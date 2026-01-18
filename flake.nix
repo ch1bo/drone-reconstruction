@@ -19,9 +19,9 @@
         # Python with dependencies for GPS processing
         pythonDeps = with pkgs.python3Packages; [
           # GPS integration dependencies
-          numpy     # For numerical operations
-          scipy     # For similarity transform estimation
-          srt       # SRT subtitle parsing (for DJI telemetry)
+          numpy # For numerical operations
+          scipy # For similarity transform estimation
+          srt # SRT subtitle parsing (for DJI telemetry)
         ];
 
         # # Nerfstudio build commented out - use on GPU machine later
@@ -65,17 +65,10 @@
             git
           ];
 
-          # Environment variables
-          QT_QPA_PLATFORM = "offscreen";
-
           shellHook = ''
             echo "🚁 Drone 3D Reconstruction Environment (COLMAP + GPS)"
             echo "======================================================="
             echo ""
-
-            # Create directory structure
-            mkdir -p input data outputs exports scripts docs
-
             echo "Environment ready! Available commands:"
             echo "  • colmap           - COLMAP SfM tool"
             echo "  • ffmpeg           - Video processing"
@@ -83,7 +76,6 @@
             echo "  • python scripts/  - GPS integration scripts"
             echo ""
             echo "Python: $(python --version)"
-            echo "Qt platform: offscreen (headless mode)"
             echo ""
             echo "Note: Nerfstudio build is disabled for faster setup."
             echo "      Use this environment for GPS data processing and COLMAP."
