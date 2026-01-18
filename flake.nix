@@ -18,73 +18,48 @@
         };
 
         # Python with base dependencies for Nerfstudio
-        python = pkgs.python311;
-        pythonWithDeps = python.withPackages (ps: with ps; [
-          pip
-          torch-bin
-          torchvision-bin
-        ]);
+        pythonDeps = with pkgs.python3Packages; [
+          torch
+          tiny-cuda-nn
+        ];
 
         # Install Nerfstudio into Nix store using pip
-        nerfstudioEnv = pkgs.stdenv.mkDerivation {
-          name = "nerfstudio-env";
+        nerfstudio = pkgs.callPackage
+          (pkgs.python3Packages.buildPythonApplication rec {
+            pname = "nerfstudio";
+            version = "1.1.5";
+            pyproject = true;
 
-          buildInputs = [ pythonWithDeps ];
+            src = pkgs.fetchPypi {
+              inherit pname version;
+              hash = "sha256-w9j9JyCFZeIDHksMifgut4GZIH1RlHVfW2yPQeAvTPk=";
+            };
 
-          # No source needed, we'll download via pip
-          dontUnpack = true;
-
-          buildPhase = ''
-            mkdir -p $out
-
-            # Install nerfstudio and dependencies using pip
-            ${pythonWithDeps}/bin/pip install \
-              --prefix=$out \
-              --no-cache-dir \
-              --no-warn-script-location \
-              nerfstudio
-          '';
-
-          installPhase = ''
-            # Create wrapper scripts for nerfstudio commands
-            mkdir -p $out/bin
-
-            # Wrap Python scripts to use correct PYTHONPATH
-            for script in $out/bin/*; do
-              if [ -f "$script" ]; then
-                mv "$script" "$script.unwrapped"
-                cat > "$script" << EOF
-#!/bin/sh
-export PYTHONPATH="$out/${python.sitePackages}:\$PYTHONPATH"
-exec "$script.unwrapped" "\$@"
-EOF
-                chmod +x "$script"
-              fi
-            done
-          '';
-        };
+            build-system = with pkgs.python3Packages; [ setuptools ];
+            dependencies = pythonDeps;
+          })
+          { };
 
       in
       {
+        packages.nerfstudio = nerfstudio;
+
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
-            # Python with PyTorch
-            pythonWithDeps
-
-            # Nerfstudio from Nix store
-            nerfstudioEnv
+            # Python with PyTorch and nerfstudio pre-installed
+            (python3withPackages (ps: pythonDeps ++ [ nerfstudio ]))
 
             # Core dependencies
-            colmap  # Structure-from-Motion
-            ffmpeg-full  # Video processing
+            colmap # Structure-from-Motion
+            ffmpeg-full # Video processing
 
             # CUDA toolkit for GPU acceleration
             cudaPackages.cudatoolkit
             cudaPackages.cudnn
 
             # Utility tools
-            exiftool  # DJI metadata extraction
-            imagemagick  # Image processing
+            exiftool # DJI metadata extraction
+            imagemagick # Image processing
 
             # Development tools
             git
@@ -111,8 +86,8 @@ EOF
             export LD_LIBRARY_PATH="${pkgs.cudaPackages.cudatoolkit}/lib:${pkgs.cudaPackages.cudnn}/lib:${pkgs.stdenv.cc.cc.lib}/lib:$LD_LIBRARY_PATH"
 
             # Add nerfstudio to PATH and PYTHONPATH
-            export PATH="${nerfstudioEnv}/bin:$PATH"
-            export PYTHONPATH="${nerfstudioEnv}/${python.sitePackages}:$PYTHONPATH"
+            export PATH="${nerfstudio}/bin:$PATH"
+            export PYTHONPATH="${nerfstudio}/${python.sitePackages}:$PYTHONPATH"
 
             # Create directory structure
             mkdir -p input data outputs exports scripts
