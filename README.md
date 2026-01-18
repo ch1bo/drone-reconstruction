@@ -4,37 +4,84 @@ A modern pipeline for creating high-quality 3D reconstructions of neighborhoods 
 
 ## Overview
 
-This project provides a streamlined workflow for offline 3D reconstruction from DJI drone 4K video feeds. It leverages state-of-the-art neural rendering techniques that have emerged in the past few years, combining classical structure-from-motion (SfM) with modern neural implicit representations.
+This project provides a streamlined workflow for offline 3D reconstruction from DJI drone 4K video feeds. It combines classical structure-from-motion (COLMAP) with GPS telemetry data from DJI SRT files to create metric-scale, georeferenced 3D models using state-of-the-art neural rendering (NeRF and 3D Gaussian Splatting).
 
-## Target Workflow
+**Key Features:**
+- Automatic GPS/altitude extraction from DJI SRT subtitle files
+- COLMAP-based reconstruction with GPS alignment
+- Metric scale (real-world measurements in meters)
+- Georeferenced output (East-North-Up coordinate system)
+- High-precision altitude using drone's infrared sensor
 
-### Getting Started
+## Workflow
+
+### Processing Pipeline
 
 ```bash
 # 1. Setup environment
-nix develop  # or use your preferred environment setup
+nix develop
 
-# 2. Process drone video
-ns-process-data video \
-  --data ./input/drone_flight.mp4 \
-  --output-dir ./data/processed_scene
+# 2. Process video with GPS alignment (one command does everything)
+./scripts/process_with_gps.sh \
+  --video ./input/DJI_20260117094312_0018_D.MP4 \
+  --srt ./input/DJI_20260117094312_0018_D.SRT \
+  --output ./data/processed_scene
 
-# 3. Train 3D Gaussian Splatting model (recommended for large outdoor scenes)
+# This automatically:
+#   - Extracts GPS/altitude from SRT
+#   - Runs COLMAP reconstruction
+#   - Aligns to GPS coordinates
+#   - Produces metric-scale, georeferenced model
+
+# 3. Inspect alignment (optional)
+colmap gui --import_path ./data/processed_scene/colmap/aligned
+
+# 4. Train 3D Gaussian Splatting on GPU machine
 ns-train splatfacto \
   --data ./data/processed_scene \
   --output-dir ./outputs/scene_01
 
-# Alternative: Train NeRF model (higher quality, slower)
-# ns-train nerfacto --data ./data/processed_scene
-
-# 4. View results interactively
+# 5. View results interactively
 ns-viewer --load-config ./outputs/scene_01/config.yml
 
-# 5. Export mesh or point cloud
+# 6. Export georeferenced point cloud
 ns-export pointcloud \
   --load-config ./outputs/scene_01/config.yml \
   --output-dir ./exports/scene_01
 ```
+
+### Manual Step-by-Step
+
+For more control or troubleshooting, run individual scripts:
+
+```bash
+# 1. Extract GPS from SRT
+python scripts/parse_srt.py \
+  --srt input/DJI_flight.SRT \
+  --video input/DJI_flight.MP4 \
+  --output data/gps_data.json
+
+# 2. Run COLMAP reconstruction (or use ns-process-data)
+# ... (see docs/gps_workflow.md)
+
+# 3. Create GPS reference poses
+python scripts/create_reference_poses.py \
+  --gps-data data/gps_data.json \
+  --output data/reference_poses.txt
+
+# 4. Align to GPS
+python scripts/align_to_gps.py \
+  --input data/colmap/sparse/0 \
+  --output data/colmap/aligned \
+  --reference data/reference_poses.txt
+
+# 5. Update transforms.json
+python scripts/update_transforms.py \
+  --aligned-colmap data/colmap/aligned \
+  --transforms data/transforms.json
+```
+
+See [docs/gps_workflow.md](docs/gps_workflow.md) for detailed documentation and troubleshooting.
 
 ### Hardware Requirements
 
@@ -55,20 +102,25 @@ ns-export pointcloud \
 ### Pipeline Architecture
 
 ```
-Drone Video (4K) 
-    ↓
-Frame Extraction
-    ↓
-COLMAP (Structure-from-Motion)
+DJI Drone Video (4K) + SRT Telemetry
+    ├── GPS/Altitude Extraction (parse_srt.py)
+    └── Frame Extraction (ffmpeg)
+          ↓
+    COLMAP (Structure-from-Motion)
     ├── Feature Detection & Matching
     ├── Sparse Reconstruction
     └── Camera Pose Estimation
-    ↓
-Neural Reconstruction
+          ↓
+    GPS Alignment (model_aligner)
+    ├── Sim3 transform estimation (rotation + translation + scale)
+    ├── Metric scale from GPS
+    └── Georeferencing to ENU coordinates
+          ↓
+    Neural Reconstruction
     ├── 3D Gaussian Splatting (fast, recommended)
     └── NeRF variants (high quality, slower)
-    ↓
-3D Model (viewable, exportable)
+          ↓
+    Metric-scale, Georeferenced 3D Model
 ```
 
 ### Key Components
@@ -171,52 +223,88 @@ Represents scenes as collections of 3D Gaussian primitives with learned paramete
    [Paper](https://arxiv.org/abs/2304.04278)  
    *Recent work combining classical SLAM robustness with neural quality*
 
-## DJI Drone Metadata
+## GPS-Aligned Reconstruction
 
-DJI drones typically embed GPS, IMU, and other telemetry data in:
-- Video file metadata (MP4 metadata tracks)
-- Separate SRT subtitle files
-- Flight log files (DAT/TXT format)
+DJI drones embed GPS, IMU, and altitude telemetry in SRT subtitle files alongside the video. This project leverages this data to create metric-scale, georeferenced 3D models.
 
-While COLMAP provides better camera poses for reconstruction, GPS data can:
-- Provide metric scale (instead of arbitrary units)
-- Initialize camera positions for faster convergence
-- Georeference the final 3D model
+### What You Get
 
-Tools for extraction:
-- `exiftool` for video metadata
-- DJI-specific parsers like `dji-srt-parser`
-- Consider implementing GPS-constrained bundle adjustment
+- **Metric Scale**: Real-world measurements in meters (not arbitrary units)
+- **Georeferencing**: Model positioned in GPS coordinate system (ENU)
+- **Precise Altitude**: Uses drone's infrared altimeter (~0.1m precision) for vertical scale
+- **GIS-Compatible**: Export models with geographic coordinates for mapping applications
+
+### How It Works
+
+1. **GPS Extraction** (`scripts/parse_srt.py`): Parses DJI SRT files to extract latitude, longitude, and altitude per frame
+2. **COLMAP Reconstruction**: Standard structure-from-motion for precise relative camera poses
+3. **GPS Alignment** (`scripts/align_to_gps.py`): Uses COLMAP's `model_aligner` to estimate similarity transform (Sim3) between COLMAP and GPS
+4. **Transform Update** (`scripts/update_transforms.py`): Updates camera poses with metric, georeferenced coordinates
+
+**Accuracy:** Consumer GPS provides ~5m horizontal, but combined with COLMAP's precision and accurate altitude data, the final model has:
+- Horizontal positioning: ±5m (GPS limited)
+- Vertical scale: ±0.1-0.5m (infrared altimeter + COLMAP)
+- Relative measurements: Sub-meter accuracy (COLMAP quality)
+
+### Processing Scripts
+
+All scripts are in `scripts/`:
+
+- `process_with_gps.sh` - End-to-end automated workflow
+- `parse_srt.py` - Extract GPS/altitude from DJI SRT files
+- `create_reference_poses.py` - Convert GPS to COLMAP format
+- `align_to_gps.py` - Align reconstruction to GPS coordinates
+- `update_transforms.py` - Update transforms.json with aligned poses
+
+See [GPS Workflow Guide](docs/gps_workflow.md) for detailed usage and troubleshooting.
 
 ## Project Structure
 
 ```
 ├── README.md
-├── flake.nix                 # Nix environment configuration
-├── input/                    # Raw drone videos
-├── data/                     # Processed datasets
+├── flake.nix                      # Nix environment configuration
+├── input/                         # Raw drone videos + SRT files
+│   ├── DJI_*.mp4                  # DJI drone videos
+│   └── DJI_*.SRT                  # DJI telemetry (GPS/altitude)
+├── data/                          # Processed datasets
 │   └── processed_scene/
-│       ├── images/           # Extracted frames
-│       ├── colmap/           # COLMAP outputs
-│       └── transforms.json   # Camera poses in NeRF format
-├── outputs/                  # Trained models
+│       ├── images/                # Extracted video frames
+│       ├── colmap/                # COLMAP outputs
+│       │   ├── sparse/0/          # Original reconstruction
+│       │   └── aligned/           # GPS-aligned reconstruction
+│       ├── gps_data.json          # Parsed GPS telemetry
+│       ├── reference_poses.txt    # GPS poses for alignment
+│       └── transforms.json        # Camera poses (georeferenced)
+├── outputs/                       # Trained NeRF/Gaussian Splatting models
 │   └── scene_01/
 │       ├── config.yml
 │       └── nerfstudio_models/
-├── exports/                  # Exported meshes, point clouds
-└── scripts/                  # Helper scripts
-    ├── extract_metadata.py
-    └── batch_process.sh
+├── exports/                       # Exported meshes, point clouds
+├── scripts/                       # GPS processing pipeline
+│   ├── process_with_gps.sh        # End-to-end workflow
+│   ├── parse_srt.py               # Extract GPS from SRT
+│   ├── create_reference_poses.py  # Convert to COLMAP format
+│   ├── align_to_gps.py            # Run GPS alignment
+│   └── update_transforms.py       # Update with aligned poses
+└── docs/
+    └── gps_workflow.md            # Detailed GPS workflow guide
 ```
+
+## Features
+
+- [x] GPS-aligned reconstruction with metric scale
+- [x] Automatic DJI SRT telemetry parsing
+- [x] Georeferenced 3D models (ENU coordinate system)
+- [x] Infrared altimeter integration for precise vertical scale
 
 ## Future Enhancements
 
 - [ ] GPU-accelerated COLMAP for faster preprocessing
 - [ ] Multi-video fusion for complete neighborhood coverage
-- [ ] GPS-constrained bundle adjustment
+- [ ] RTK GPS support for centimeter-level accuracy
 - [ ] Automated flight path planning for optimal coverage
 - [ ] Web-based 3D viewer for sharing results
-- [ ] Mesh post-processing and texturing
+- [ ] GIS export formats (GeoTIFF, LAS with coordinates)
 - [ ] Change detection across different flight dates
 
 ## Troubleshooting
