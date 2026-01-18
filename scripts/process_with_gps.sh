@@ -17,6 +17,12 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+# Set Qt platform for headless COLMAP (if not already set)
+if [ -z "$QT_QPA_PLATFORM" ]; then
+    export QT_QPA_PLATFORM=offscreen
+    echo -e "${YELLOW}[INFO]${NC} Setting QT_QPA_PLATFORM=offscreen for headless mode"
+fi
+
 # Helper functions
 log_info() {
     echo -e "${GREEN}[INFO]${NC} $1"

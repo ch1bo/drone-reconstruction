@@ -65,6 +65,9 @@
             git
           ];
 
+          # Environment variables
+          QT_QPA_PLATFORM = "offscreen";
+
           shellHook = ''
             echo "🚁 Drone 3D Reconstruction Environment (COLMAP + GPS)"
             echo "======================================================="
@@ -80,6 +83,7 @@
             echo "  • python scripts/  - GPS integration scripts"
             echo ""
             echo "Python: $(python --version)"
+            echo "Qt platform: offscreen (headless mode)"
             echo ""
             echo "Note: Nerfstudio build is disabled for faster setup."
             echo "      Use this environment for GPS data processing and COLMAP."
