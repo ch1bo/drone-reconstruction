@@ -13,6 +13,7 @@
           inherit system;
           config = {
             allowUnfree = true;
+            cudaSupport = true;
           };
         };
 
@@ -24,34 +25,30 @@
           srt # SRT subtitle parsing (for DJI telemetry)
         ];
 
-        # # Nerfstudio build commented out - use on GPU machine later
-        # nerfstudio = pkgs.callPackage
-        #   (pkgs.python3Packages.buildPythonApplication rec {
-        #     pname = "nerfstudio";
-        #     version = "1.1.5";
-        #     pyproject = true;
-        #
-        #     src = pkgs.fetchPypi {
-        #       inherit pname version;
-        #       hash = "sha256-w9j9JyCFZeIDHksMifgut4GZIH1RlHVfW2yPQeAvTPk=";
-        #     };
-        #
-        #     build-system = with pkgs.python3Packages; [ setuptools ];
-        #     dependencies = pythonDeps;
-        #   })
-        #   { };
+        # Nerfstudio build commented out - use on GPU machine later
+        nerfstudio = pkgs.callPackage
+          (pkgs.python3Packages.buildPythonApplication rec {
+            pname = "nerfstudio";
+            version = "1.1.5";
+            pyproject = true;
 
-        # Python version
-        python = pkgs.python3;
+            src = pkgs.fetchPypi {
+              inherit pname version;
+              hash = "sha256-w9j9JyCFZeIDHksMifgut4GZIH1RlHVfW2yPQeAvTPk=";
+            };
 
+            build-system = with pkgs.python3Packages; [ setuptools ];
+            dependencies = with pkgs.python3Packages; [ torch tiny-cuda-nn ];
+          })
+          { };
       in
       {
-        # packages.nerfstudio = nerfstudio;
+        packages.nerfstudio = nerfstudio;
 
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
             # Python with GPS processing dependencies
-            (python.withPackages (ps: pythonDeps))
+            (python3.withPackages (ps: pythonDeps))
 
             # Core dependencies
             colmap # Structure-from-Motion
@@ -85,4 +82,9 @@
         };
       }
     );
+
+  nixConfig = {
+    extra-substituters = [ "https://cache.nixos-cuda.org" ];
+    extra-trusted-public-keys = [ "cache.nixos-cuda.org:74DUi4Ye579gUqzH4ziL9IyiJBlDpMRn9MBN8oNan9M=" ];
+  };
 }
