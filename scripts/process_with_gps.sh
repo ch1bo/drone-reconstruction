@@ -46,6 +46,7 @@ Options:
     -v, --video FILE        Input video file (MP4)
     -s, --srt FILE         Input SRT file (DJI telemetry)
     -o, --output DIR       Output directory (default: ./data/processed_scene)
+    --cpu                  Force CPU-only mode for COLMAP (use on headless servers)
     -h, --help             Show this help message
 
 Workflow:
@@ -59,8 +60,8 @@ Examples:
     # Process video with GPS alignment
     $0 --video input/flight.mp4 --srt input/flight.SRT --output data/scene1
 
-    # Use existing COLMAP reconstruction
-    $0 --video input/flight.mp4 --srt input/flight.SRT --output data/scene1
+    # Use CPU-only mode (for headless servers)
+    $0 --video input/flight.mp4 --srt input/flight.SRT --output data/scene1 --cpu
 
 EOF
 }
@@ -70,6 +71,7 @@ VIDEO=""
 SRT=""
 OUTPUT_DIR="./data/processed_scene"
 SKIP_COLMAP=false
+USE_CPU=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -85,6 +87,10 @@ while [[ $# -gt 0 ]]; do
         -o|--output)
             OUTPUT_DIR="$2"
             shift 2
+            ;;
+        --cpu)
+            USE_CPU=true
+            shift
             ;;
         -h|--help)
             usage
@@ -122,6 +128,11 @@ log_info "Starting GPS-aligned COLMAP processing"
 log_info "Video: $VIDEO"
 log_info "SRT: $SRT"
 log_info "Output: $OUTPUT_DIR"
+if [ "$USE_CPU" = true ]; then
+    log_info "Mode: CPU-only (--cpu flag set)"
+else
+    log_info "Mode: GPU-accelerated (default)"
+fi
 echo
 
 # ============================================================================
@@ -172,19 +183,39 @@ else
     fi
 
     # COLMAP feature extraction
-    log_info "COLMAP: Feature extraction..."
+    if [ "$USE_CPU" = true ]; then
+        log_info "COLMAP: Feature extraction (CPU mode)..."
+    else
+        log_info "COLMAP: Feature extraction (GPU mode)..."
+    fi
     mkdir -p "$COLMAP_DIR"
 
-    colmap feature_extractor \
-        --database_path "$COLMAP_DIR/database.db" \
-        --image_path "$IMAGES_DIR" \
-        --ImageReader.camera_model OPENCV \
-        --ImageReader.single_camera 1
+    if [ "$USE_CPU" = true ]; then
+        colmap feature_extractor \
+            --database_path "$COLMAP_DIR/database.db" \
+            --image_path "$IMAGES_DIR" \
+            --ImageReader.camera_model OPENCV \
+            --ImageReader.single_camera 1 \
+            --FeatureExtraction.use_gpu 0
+    else
+        colmap feature_extractor \
+            --database_path "$COLMAP_DIR/database.db" \
+            --image_path "$IMAGES_DIR" \
+            --ImageReader.camera_model OPENCV \
+            --ImageReader.single_camera 1
+    fi
 
     # COLMAP feature matching
-    log_info "COLMAP: Feature matching..."
-    colmap exhaustive_matcher \
-        --database_path "$COLMAP_DIR/database.db"
+    if [ "$USE_CPU" = true ]; then
+        log_info "COLMAP: Feature matching (CPU mode)..."
+        colmap exhaustive_matcher \
+            --database_path "$COLMAP_DIR/database.db" \
+            --FeatureMatching.use_gpu 0
+    else
+        log_info "COLMAP: Feature matching (GPU mode)..."
+        colmap exhaustive_matcher \
+            --database_path "$COLMAP_DIR/database.db"
+    fi
 
     # COLMAP sparse reconstruction
     log_info "COLMAP: Sparse reconstruction..."

@@ -293,6 +293,59 @@ python scripts/create_reference_poses.py \
        --output_type TXT
    ```
 
+### Qt/X11 Error on Headless Server
+
+**Symptom:**
+```
+qt.qpa.xcb: could not connect to display
+This application failed to start because no Qt platform plugin could be initialized
+```
+
+**Cause:** COLMAP has Qt dependencies and tries to initialize a display even for CLI operations
+
+**Solutions:**
+
+1. **Using Nix (Automatic):** The flake.nix already sets this for you
+   ```bash
+   nix develop  # QT_QPA_PLATFORM=offscreen is set automatically
+   ./scripts/process_with_gps.sh ...
+   ```
+
+2. **Manual Setup:** Set environment variable before running
+   ```bash
+   export QT_QPA_PLATFORM=offscreen
+   ./scripts/process_with_gps.sh ...
+   ```
+
+3. **Alternative:** Use xvfb (virtual framebuffer)
+   ```bash
+   xvfb-run ./scripts/process_with_gps.sh ...
+   ```
+
+**Note:** The `process_with_gps.sh` script automatically sets `QT_QPA_PLATFORM=offscreen` if not already set.
+
+### OpenGL Context Error on Headless Server
+
+**Symptom:**
+```
+E20260118 20:40:02.303983 140640883779904 opengl_utils.cc:56] Check failed: context_.create()
+terminate called after throwing an instance of 'std::invalid_argument'
+```
+
+**Cause:** COLMAP tries to use GPU/OpenGL for feature extraction but can't create OpenGL context on headless server
+
+**Solution:** Use CPU-only mode
+
+```bash
+./scripts/process_with_gps.sh \
+  --video input/flight.mp4 \
+  --srt input/flight.SRT \
+  --output data/scene \
+  --cpu
+```
+
+**Note:** CPU mode is slower than GPU mode (2-3x) but works on all systems. Use GPU mode on machines with display or proper GPU passthrough.
+
 ## Advanced Usage
 
 ### RTK GPS (High Precision)
