@@ -18,7 +18,6 @@ def run_colmap_aligner(
     reference_path: Path,
     alignment_type: str = "enu",
     max_error: float = 10.0,
-    robust_alignment_max_error: float = None
 ) -> bool:
     """
     Run COLMAP model_aligner.
@@ -29,14 +28,10 @@ def run_colmap_aligner(
         reference_path: Path to reference poses file
         alignment_type: Type of alignment (enu, ecef, custom)
         max_error: Maximum reprojection error threshold in meters
-        robust_alignment_max_error: RANSAC threshold (defaults to max_error if None)
 
     Returns:
         True if successful, False otherwise
     """
-    if robust_alignment_max_error is None:
-        robust_alignment_max_error = max_error
-
     # Ensure output directory exists
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -49,7 +44,6 @@ def run_colmap_aligner(
         "--ref_is_gps", "1",
         "--alignment_type", alignment_type,
         "--alignment_max_error", str(max_error),
-        "--robust_alignment_max_error", str(robust_alignment_max_error),
     ]
 
     print("Running COLMAP model_aligner...")
@@ -180,7 +174,6 @@ Examples:
         reference_path=args.reference,
         alignment_type=args.alignment_type,
         max_error=args.max_error,
-        robust_alignment_max_error=args.robust_error
     )
 
     if success:
