@@ -34,7 +34,10 @@ nix develop
 #   - Produces metric-scale, georeferenced model
 
 # 3. Inspect alignment (optional)
-colmap gui --import_path ./data/processed_scene/colmap/aligned
+colmap gui \
+  --database_path ./data/processed_scene/colmap/database.db \
+  --import_path ./data/processed_scene/colmap/sparse/1 \
+  --image_path ./data/processed_scene/images
 
 # 4. Train 3D Gaussian Splatting on GPU machine
 ns-train splatfacto \

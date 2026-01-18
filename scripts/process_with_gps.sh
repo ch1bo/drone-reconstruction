@@ -37,7 +37,7 @@ Usage: $0 [OPTIONS]
 Process drone video with GPS-aligned COLMAP reconstruction.
 
 Options:
-    -v, --video FILE        Input video file (MP4)
+    -v, --video FILE       Input video file (MP4)
     -s, --srt FILE         Input SRT file (DJI telemetry)
     -o, --output DIR       Output directory (default: ./data/processed_scene)
     --cpu                  Force CPU-only mode for COLMAP (use on headless servers)
