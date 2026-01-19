@@ -39,3 +39,4 @@ Thumbs.db
 .claude/
 /input/
 /.direnv/
+/.venv/
