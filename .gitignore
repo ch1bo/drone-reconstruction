@@ -9,11 +9,8 @@ outputs/
 exports/
 data/
 
-# Input videos (typically large files)
-input/*.mp4
-input/*.mov
-input/*.MP4
-input/*.MOV
+# Input data
+input/*
 
 # Nix
 result
@@ -37,6 +34,6 @@ Thumbs.db
 *.tmp
 *.bak
 .claude/
-/input/
+/cache/
 /.direnv/
 /.venv/

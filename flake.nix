@@ -66,6 +66,12 @@
             pip install -e .
           '';
 
+          postShellHook = ''
+            # Redirect tiny-cuda-nn cache to writable location (Nix store is read-only)
+            export TCNN_CACHE_PATH="cache/tinycudann"
+            mkdir -p "$TCNN_CACHE_PATH"
+          '';
+
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
             pkgs.libx11
             pkgs.libudev-zero
