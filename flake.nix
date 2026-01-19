@@ -61,13 +61,17 @@
           postVenvCreation = ''
             unset SOURCE_DATE_EPOCH
             pip install --upgrade pip
-            pip install nerfstudio
+            git submodule update --init
+            cd nerfstudio
+            pip install -e .
           '';
 
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
             pkgs.libx11
             pkgs.libudev-zero
             pkgs.libglvnd
+            pkgs.glib
+            pkgs.xorg.libxcb
           ];
         };
       }
