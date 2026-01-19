@@ -63,6 +63,12 @@
             pip install --upgrade pip
             pip install nerfstudio
           '';
+
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+            pkgs.libx11
+            pkgs.libudev-zero
+            pkgs.libglvnd
+          ];
         };
       }
     );
