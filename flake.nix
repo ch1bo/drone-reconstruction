@@ -85,17 +85,12 @@
             pip install -e .
           '';
 
-          # Set CUDA paths
-          CUDA_HOME = pkgs.cudaPackages.cudatoolkit;
-
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
             pkgs.libx11
             pkgs.libudev-zero
             pkgs.libglvnd
             pkgs.glib
             pkgs.xorg.libxcb
-            pkgs.cudaPackages.cudatoolkit
-            pkgs.cudaPackages.cudnn
           ];
         };
       }
