@@ -14,23 +14,32 @@
           config = {
             allowUnfree = true;
             cudaSupport = true;
+            cudaCapabilities = [ "8.9" ]; # RTX 40XX cards
           };
         };
 
         # Older version needed for a few nerfstudio dependencies
         python = pkgs.python312;
 
+        # Patch tiny-cuda-nn to respect TCNN_CACHE_PATH environment variable
+        tiny-cuda-nn-patched = python.pkgs.tiny-cuda-nn.overrideAttrs (oldAttrs: {
+          postPatch = (oldAttrs.postPatch or "") + ''
+            # Patch modules.py to check for TCNN_CACHE_PATH environment variable
+            sed -i 's|_rtc_cache_dir = os.path.join(os.path.dirname(__file__), "rtc", "cache")|_rtc_cache_dir = os.environ.get("TCNN_CACHE_PATH", os.path.join(os.path.dirname(__file__), "rtc", "cache"))|g' \
+              bindings/torch/tinycudann/modules.py
+          '';
+        });
+
         # Python with dependencies for GPS processing
-        pythonDeps = with python.pkgs; [
+        pythonDeps = [
           # GPS integration dependencies
-          numpy # For numerical operations
-          scipy # For similarity transform estimation
-          srt # SRT subtitle parsing (for DJI telemetry)
+          python.pkgs.numpy # For numerical operations
+          python.pkgs.scipy # For similarity transform estimation
+          python.pkgs.srt # SRT subtitle parsing (for DJI telemetry)
 
           # Nerfstudio dependencies
-          # Installed via nix for the cuda support
-          torch
-          tiny-cuda-nn
+          python.pkgs.torch
+          tiny-cuda-nn-patched
         ];
       in
       {
@@ -47,6 +56,9 @@
             # Build dependencies
             pkg-config
             cmake
+            # CUDA for building tiny-cuda-nn from source
+            cudaPackages.cudatoolkit
+            cudaPackages.cudnn
             # A Python interpreter including the 'venv' module is required to
             # bootstrap the environment.
             python
@@ -58,19 +70,23 @@
           ++ pythonDeps;
 
           # Install nerfstudio via pip as many dependencies are not in nixpkgs
-          postVenvCreation = ''
+          postShellHook = ''
+            set -e
             unset SOURCE_DATE_EPOCH
             pip install --upgrade pip
+
+            # Set writable cache for patched tiny-cuda-nn
+            export TCNN_CACHE_PATH="$PWD/cache/tinycudann"
+            mkdir -p "$TCNN_CACHE_PATH"
+
+            # Install nerfstudio
             git submodule update --init
             cd nerfstudio
             pip install -e .
           '';
 
-          postShellHook = ''
-            # Redirect tiny-cuda-nn cache to writable location (Nix store is read-only)
-            export TCNN_CACHE_PATH="cache/tinycudann"
-            mkdir -p "$TCNN_CACHE_PATH"
-          '';
+          # Set CUDA paths
+          CUDA_HOME = pkgs.cudaPackages.cudatoolkit;
 
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
             pkgs.libx11
@@ -78,6 +94,8 @@
             pkgs.libglvnd
             pkgs.glib
             pkgs.xorg.libxcb
+            pkgs.cudaPackages.cudatoolkit
+            pkgs.cudaPackages.cudnn
           ];
         };
       }
