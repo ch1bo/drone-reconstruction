@@ -1,0 +1,12 @@
+diff --git a/bindings/torch/tinycudann/modules.py b/bindings/torch/tinycudann/modules.py
+index 1234567..abcdefg 100644
+--- a/bindings/torch/tinycudann/modules.py
++++ b/bindings/torch/tinycudann/modules.py
+@@ -79,7 +79,7 @@ _rtc_dir = os.path.join(os.path.dirname(__file__), "rtc")
+ _rtc_include_dir = os.path.join(_rtc_dir, "include")
+ _C.rtc_set_include_dir(_rtc_include_dir)
+
+-_rtc_cache_dir = os.path.join(_rtc_dir, "cache")
++_rtc_cache_dir = os.environ.get("TCNN_CACHE_PATH", os.path.join(_rtc_dir, "cache"))
+ os.makedirs(_rtc_cache_dir, exist_ok=True)
+ _C.rtc_set_cache_dir(_rtc_cache_dir)

@@ -23,11 +23,9 @@
 
         # Patch tiny-cuda-nn to respect TCNN_CACHE_PATH environment variable
         tiny-cuda-nn-patched = python.pkgs.tiny-cuda-nn.overrideAttrs (oldAttrs: {
-          postPatch = (oldAttrs.postPatch or "") + ''
-            # Patch modules.py to check for TCNN_CACHE_PATH environment variable
-            sed -i 's|_rtc_cache_dir = os.path.join(os.path.dirname(__file__), "rtc", "cache")|_rtc_cache_dir = os.environ.get("TCNN_CACHE_PATH", os.path.join(os.path.dirname(__file__), "rtc", "cache"))|g' \
-              bindings/torch/tinycudann/modules.py
-          '';
+          patches = (oldAttrs.patches or [ ]) ++ [
+            ./patches/tiny-cuda-nn-cache-env.patch
+          ];
         });
 
         # Python with dependencies for GPS processing
@@ -43,6 +41,7 @@
         ];
       in
       {
+        # TODO: separate into a train/view shell
         devShells.default = pkgs.mkShell {
           name = "droneReconstructionVenv";
           venvDir = "./.venv";
