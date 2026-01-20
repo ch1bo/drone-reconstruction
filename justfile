@@ -4,8 +4,12 @@
 
 video := "input/DJI_20260117094312_0018_D.MP4"
 srt := "input/DJI_20260117094312_0018_D.SRT"
-data := "data/processed"
-output := "outputs/scene_01"
+name := "processed"
+data := "data" / name
+output := "outputs" / name
+verbose := ""
+
+set unstable := true
 
 # Show this help
 @default:
@@ -31,11 +35,12 @@ align srt=srt data=data:
 
 # Run nerfstudio preprocessing (COLMAP)
 [group('steps')]
-process out="processed" video=video:
+process video=video out=name:
     ns-process-data video --data {{ video }} --output-dir data/{{ out }} \
       --num-downscales 0 \
       --matching-method sequential \
-      --num-frames-target 1000
+      --num-frames-target 1000 \
+      {{ verbose && '--verbose' }}
 
 # Open COLMAP GUI to inspect model
 [group('steps')]
