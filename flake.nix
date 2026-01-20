@@ -86,19 +86,21 @@
               ++ pythonDeps;
 
               # Install nerfstudio via pip as many dependencies are not in nixpkgs
-              postShellHook = ''
+              postVenvCreation = ''
                 set -e
                 unset SOURCE_DATE_EPOCH
                 pip install --upgrade pip
-
-                # Set writable cache for patched tiny-cuda-nn
-                export TCNN_CACHE_PATH="$PWD/cache/tinycudann"
-                mkdir -p "$TCNN_CACHE_PATH"
 
                 # Install nerfstudio
                 git submodule update --init
                 cd nerfstudio
                 pip install -e .
+              '';
+
+              postShellHook = ''
+                # Set writable cache for patched tiny-cuda-nn
+                export TCNN_CACHE_PATH="$PWD/cache/tinycudann"
+                mkdir -p "$TCNN_CACHE_PATH"
               '';
 
               LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
