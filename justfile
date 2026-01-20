@@ -38,7 +38,9 @@ align srt=srt data=data:
 [arg("video", long="video")]
 [group('steps')]
 process frames="1000" video=video out=name:
-    ns-process-data video --data {{ video }} --output-dir data/{{ out }} \
+    # REVIEW: no downscales makes it slow, but good?
+    ns-process-data video --data {{ video }} --output-dir {{ "data" / out }} \
+      --num-downscales 0 \
       --matching-method sequential \
       --num-frames-target {{ frames }} \
       {{ verbose && '--verbose' }}
@@ -46,12 +48,12 @@ process frames="1000" video=video out=name:
 # Open COLMAP GUI to inspect model
 [group('steps')]
 colmap-gui model="sparse/0":
-    colmap gui --import_path {{ data + "/" + model }} --database_path {{ data + "/database.db" }} --image_path {{ data + "/images" }}
+    colmap gui --import_path {{ data / model }} --database_path {{ data / "database.db" }} --image_path {{ data / "images" }}
 
 # Train Gaussian Splatting model
 [group('steps')]
-train data=data steps="30000":
-    ns-train splatfacto --data {{ data }} --output-dir outputs/ --max-num-iterations {{ steps }}
+train:
+    ns-train splatfacto --data {{ "data" / name }} --output-dir outputs/
 
 # View trained model
 [group('steps')]
