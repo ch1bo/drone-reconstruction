@@ -62,6 +62,7 @@
               name = "droneReconstructionFull";
               venvDir = "./.venv";
               buildInputs = with pkgs; [
+                just
                 # Core dependencies
                 colmap # Structure-from-Motion
                 ffmpeg-full # Video processing
