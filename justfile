@@ -31,7 +31,7 @@ align srt=srt data=data:
 
 # Run nerfstudio preprocessing (COLMAP)
 [group('steps')]
-process video=video out="processed":
+process out="processed" video=video:
     ns-process-data video --data {{ video }} --output-dir data/{{ out }} \
       --num-downscales 0 \
       --matching-method sequential \
