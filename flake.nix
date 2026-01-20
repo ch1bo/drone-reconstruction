@@ -17,6 +17,7 @@
             pkgs.mkShell {
               name = "droneReconstructionColmapOnly";
               buildInputs = with pkgs; [
+                just
                 colmap # Structure-from-Motion
                 ffmpeg-full # Video processing
               ];
