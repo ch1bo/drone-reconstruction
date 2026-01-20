@@ -31,8 +31,11 @@ align srt=srt data=data:
 
 # Run nerfstudio preprocessing (COLMAP)
 [group('steps')]
-preprocess video=video out=data:
-    ns-process-data video --data {{ video }} --output-dir {{ out }}
+process video=video out="processed":
+    ns-process-data video --data {{ video }} --output-dir data/{{ out }} \
+      --num-downscales 0 \
+      --matching-method sequential \
+      --num-frames-target 1000
 
 # Open COLMAP GUI to inspect model
 [group('steps')]
