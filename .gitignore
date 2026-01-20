@@ -35,5 +35,8 @@ Thumbs.db
 *.bak
 .claude/
 /cache/
-/.direnv/
 /.venv/
+
+# Allow direnv config to differ
+.envrc
+/.direnv/
