@@ -154,12 +154,13 @@ example:
                      [e['rel_alt'] if use_rel else e['abs_alt'] for e in entries])
 
     # Write reference poses file
-    # COLMAP model_aligner --ref_is_gps 1 expects: image_name longitude latitude altitude
+    # COLMAP model_aligner --ref_is_gps 1 expects: image_name latitude longitude altitude
+    # (COLMAP's EllipsoidToENU treats column 0 as latitude, column 1 as longitude)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with open(args.output, 'w') as f:
-        for i, (lon, lat, alt) in enumerate(zip(lons, lats, alts)):
+        for i, (lat, lon, alt) in enumerate(zip(lats, lons, alts)):
             name = f"frame_{i+1:06d}.jpg"
-            f.write(f"{name} {lon:.8f} {lat:.8f} {alt:.3f}\n")
+            f.write(f"{name} {lat:.8f} {lon:.8f} {alt:.3f}\n")
 
     print(f"Wrote {len(frame_times)} reference poses to {args.output}")
     return 0

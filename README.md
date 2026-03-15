@@ -191,10 +191,10 @@ scale. The Sim3 fit recovers rotation (to align orientation), translation
 meters) all at once.
 
 **Coordinate system: ENU.** The aligned model uses an East-North-Up local
-coordinate system with its origin at the first camera position. ENU is a
-right-handed, metric coordinate system standard in surveying and robotics.
-ECEF (Earth-Centered-Earth-Fixed) is the alternative, but ENU is more
-intuitive for a local scene.
+coordinate system: X=East, Y=North, Z=Up, origin at the first camera
+position, units in metres. ENU is right-handed and standard in surveying
+and robotics. ECEF (Earth-Centered-Earth-Fixed) is the alternative but
+less intuitive for a local scene.
 
 **Altitude: relative, not absolute.** DJI SRT files contain both
 `rel_alt` (height above the takeoff point, from the drone's infrared
@@ -257,7 +257,8 @@ ns-train splatfacto \
   --data data/flight1 \
   --output-dir outputs/ \
   colmap-data-parser-config \
-    --colmap-path colmap/aligned
+    --colmap-path colmap/aligned \
+    --assume-colmap-world-coordinate-convention False
 ```
 
 This trains a 3D Gaussian Splatting model. Training takes 30–60 minutes on an RTX 4070 Ti.
@@ -266,6 +267,13 @@ Nerfstudio's `colmap` dataparser reads the sparse model directly from
 `data/<scene>/colmap/<model>/` and images from `data/<scene>/images/` —
 no intermediate `transforms.json` conversion needed. The `--colmap-path`
 argument selects the GPS-aligned model rather than the raw `sparse/0`.
+
+`--assume-colmap-world-coordinate-convention False` is required when using
+a GPS-aligned model. By default the dataparser assumes unaligned COLMAP
+output, where gravity points along -Y, and applies a transform to remap it
+to nerfstudio's +Z-up convention (swapping Y/Z and negating). A GPS-aligned
+ENU model already has X=East, Y=North, Z=Up, so that remapping must be
+skipped or it inverts the Z axis and misplaces North.
 
 **Why Gaussian Splatting over NeRF?** For large outdoor scenes, Gaussian
 Splatting trains faster (~30 min vs. 2–8 hours for a full NeRF), renders in
