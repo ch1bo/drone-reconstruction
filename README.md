@@ -64,17 +64,18 @@ allows pinning to a specific commit and applying local patches if needed.
 
 ## Pipeline
 
-The full pipeline, from raw drone footage to a 3D model, has two major
-phases: **preprocessing** (CPU-bound, runs anywhere) and **training**
-(GPU-bound, needs an NVIDIA card).
+Frame extraction, sparse reconstruction, and GPS alignment run in the
+default shell (`nix develop`) — they only need ffmpeg and COLMAP. The
+optional dense point cloud step is split: `image_undistorter` and
+`stereo_fusion` are CPU-only (default shell); `patch_match_stereo` needs
+CUDA (full shell). Training and viewing need the full shell for nerfstudio.
 
 ```
 DJI video (.MP4) + telemetry (.SRT)
         │
         ▼
-  ns-process-data           ← nerfstudio wrapper around COLMAP
-        │  extracts frames, runs COLMAP feature extraction,
-        │  matching, and sparse reconstruction
+  ffmpeg                    ← extract frames
+  colmap                    ← feature extraction, matching, sparse SfM
         │
         ▼
   GPS alignment             ← align_existing_reconstruction.sh
@@ -82,7 +83,7 @@ DJI video (.MP4) + telemetry (.SRT)
         │  COLMAP model_aligner (Sim3 fit to GPS positions)
         │
         ▼
-  transforms.json           ← georeferenced camera poses + intrinsics
+  colmap (optional)         ← dense point cloud via MVS
         │
         ▼
   ns-train splatfacto       ← 3D Gaussian Splatting training
@@ -91,39 +92,75 @@ DJI video (.MP4) + telemetry (.SRT)
   ns-viewer / ns-export     ← interactive viewing or mesh/point cloud export
 ```
 
-### Step 1: Preprocessing with ns-process-data
+### Frame extraction
 
 ```sh
-ns-process-data video \
-  --data input/DJI_20260117094312_0018_D.MP4 \
-  --output-dir data/scene01 \
-  --num-downscales 0 \
-  --matching-method sequential \
-  --num-frames-target 1000
+mkdir -p data/haggenfeld1/images
+
+ffmpeg -i input/DJI_20260117094312_0018_D.MP4 \
+  -vf fps=2 \
+  -q:v 2 \
+  data/haggenfeld1/images/frame_%06d.jpg
 ```
 
-This runs `ns-process-data video`, which:
+`fps=2` extracts 2 frames per second. For a 5-minute flight at normal
+drone speed that gives ~600 frames, which is enough overlap for COLMAP.
+More frames means better reconstruction but slower COLMAP matching.
 
-1. Extracts `N` frames from the video with ffmpeg (default: 1000 frames,
-   evenly spaced)
-2. Runs COLMAP feature extraction, sequential matching, and sparse
-   reconstruction
-3. Outputs `data/processed/transforms.json` with camera poses + intrinsics
+`-q:v 2` is near-lossless JPEG quality. COLMAP's feature extractor works
+on the images directly, so quality matters more here than disk space.
 
-**Sequential matching** is used instead of exhaustive matching because drone
-footage is a continuous flyover — nearby frames share the most features.
-Exhaustive matching compares all pairs and is O(n²); sequential is much
-faster for video.
+### Sparse reconstruction with COLMAP
 
-**`--num-downscales 0`** is set so COLMAP works at full resolution. Downscaled
-variants take up disk space and are not needed here.
+```sh
+# Feature extraction — SIFT keypoints for each image
+colmap feature_extractor \
+  --database_path data/haggenfeld1/colmap/database.db \
+  --image_path data/haggenfeld1/images \
+  --ImageReader.camera_model OPENCV \
+  --ImageReader.single_camera 1
 
-### Step 2: GPS alignment
+# Sequential matching — matches each frame to its neighbours only
+colmap sequential_matcher \
+  --database_path data/haggenfeld1/colmap/database.db
+
+# Sparse reconstruction — estimates camera poses and 3D point cloud
+colmap mapper \
+  --database_path data/haggenfeld1/colmap/database.db \
+  --image_path data/haggenfeld1/images \
+  --output_path data/haggenfeld1/colmap/sparse
+```
+
+`single_camera 1` tells COLMAP all images share the same intrinsics (one
+physical lens), which is correct for a single drone video and reduces the
+degrees of freedom during bundle adjustment.
+
+`OPENCV` camera model supports radial and tangential distortion
+coefficients (k1, k2, p1, p2), appropriate for drone camera lenses.
+
+**Sequential matching** is used rather than exhaustive matching because
+drone video is a continuous flyover — consecutive frames share the most
+features. Exhaustive matching is O(n²) in frame count and unnecessary here.
+
+The mapper outputs one or more reconstructions under
+`colmap/sparse/0/`, `colmap/sparse/1/`, etc., ordered by the number of
+registered images. `0` is usually the largest and the one to use.
+
+Inspect the result:
+
+```sh
+colmap gui \
+  --import_path data/haggenfeld1/colmap/sparse/0 \
+  --database_path data/haggenfeld1/colmap/database.db \
+  --image_path data/haggenfeld1/images
+```
+
+### GPS alignment
 
 ```sh
 ./scripts/align_existing_reconstruction.sh \
   --srt input/DJI_20260117094312_0018_D.SRT \
-  --data data/scene01
+  --data data/haggenfeld1
 ```
 
 This script:
@@ -136,8 +173,7 @@ This script:
 3. Runs `colmap model_aligner` to fit a **Sim3** (similarity) transform —
    rotation, translation, and a single global scale factor — between the
    COLMAP reconstruction and the GPS positions
-4. Updates `transforms.json` with the aligned (georeferenced) camera poses
-   (`scripts/update_transforms.py`)
+4. Writes the aligned model to `colmap/aligned/`
 
 **Why Sim3 and not just translation?** COLMAP from monocular video produces
 poses that are correct up to an unknown scale. GPS provides the real-world
@@ -163,13 +199,64 @@ dominant source of error in the final model's geographic positioning.
 Relative distances within the model (measured from COLMAP, not GPS) are
 sub-meter accurate.
 
-### Step 3: Training
+### Dense point cloud (optional)
+
+After the sparse reconstruction, COLMAP can compute per-pixel depth maps
+and fuse them into a dense point cloud via Multi-View Stereo. This gives
+real geometry — not a learned representation — directly usable in
+MeshLab, CloudCompare, or a GIS tool.
+
+The MVS pipeline needs its own workspace layout (undistorted images +
+sparse model as siblings). `image_undistorter` sets that up from the
+GPS-aligned model:
 
 ```sh
-ns-train splatfacto --data data/scene01 --output-dir outputs/
+# Prepare undistorted workspace for MVS
+colmap image_undistorter \
+  --image_path data/haggenfeld1/images \
+  --input_path data/haggenfeld1/colmap/aligned \
+  --output_path data/haggenfeld1/dense \
+  --output_type COLMAP
+
+# Compute depth maps (requires CUDA, run in nix develop .#full)
+colmap patch_match_stereo \
+  --workspace_path data/haggenfeld1/dense \
+  --workspace_type COLMAP \
+  --PatchMatchStereo.geom_consistency true
+
+# Fuse depth maps into a single point cloud
+colmap stereo_fusion \
+  --workspace_path data/haggenfeld1/dense \
+  --workspace_type COLMAP \
+  --input_type geometric \
+  --output_path data/haggenfeld1/dense/fused.ply
+```
+
+The output `fused.ply` is a coloured point cloud in the same coordinate
+system as the sparse model — so if you have run GPS alignment, it is
+already georeferenced in ENU metres.
+
+`patch_match_stereo` is GPU-only (CUDA required). `image_undistorter` and
+`stereo_fusion` run on CPU and can be done in the default shell.
+`stereo_fusion` is also the step most sensitive to RAM: for 1000 full-res
+frames expect several GB of working set.
+
+### Training
+
+```sh
+ns-train splatfacto \
+  --data data/haggenfeld1 \
+  --output-dir outputs/ \
+  colmap-data-parser-config \
+    --colmap-path colmap/aligned
 ```
 
 This trains a 3D Gaussian Splatting model. Training takes 30–60 minutes on an RTX 4070 Ti.
+
+Nerfstudio's `colmap` dataparser reads the sparse model directly from
+`data/<scene>/colmap/<model>/` and images from `data/<scene>/images/` —
+no intermediate `transforms.json` conversion needed. The `--colmap-path`
+argument selects the GPS-aligned model rather than the raw `sparse/0`.
 
 **Why Gaussian Splatting over NeRF?** For large outdoor scenes, Gaussian
 Splatting trains faster (~30 min vs. 2–8 hours for a full NeRF), renders in
@@ -182,29 +269,23 @@ Nerfstudio's implementation and well-maintained.
 
 ```sh
 # Interactive viewer (serves in browser)
-ns-viewer --load-config outputs/scene01/splatfacto/<timestamp>/config.yml
-
-# Inspect COLMAP sparse reconstruction
-colmap gui \
-  --import_path data/scene01/colmap/sparse/0 \
-  --database_path data/scene01/database.db \
-  --image_path data/scene01/images
+ns-viewer --load-config outputs/haggenfeld1/splatfacto/<timestamp>/config.yml
 
 # Render a saved camera path
 ns-render camera-path \
-  --load-config outputs/scene01/splatfacto/<timestamp>/config.yml \
+  --load-config outputs/haggenfeld1/splatfacto/<timestamp>/config.yml \
   --camera-path-filename cameras/path.json \
-  --output-path renders/scene01.mp4
+  --output-path renders/haggenfeld1.mp4
 
-# Export point cloud
+# Export point cloud from the Gaussian model
 ns-export pointcloud \
-  --load-config outputs/scene01/splatfacto/<timestamp>/config.yml \
-  --output-dir exports/scene01
+  --load-config outputs/haggenfeld1/splatfacto/<timestamp>/config.yml \
+  --output-dir exports/haggenfeld1
 
 # Export mesh
 ns-export poisson \
-  --load-config outputs/scene01/splatfacto/<timestamp>/config.yml \
-  --output-dir exports/scene01
+  --load-config outputs/haggenfeld1/splatfacto/<timestamp>/config.yml \
+  --output-dir exports/haggenfeld1
 ```
 
 The nerfstudio viewer (`ns-viewer`) serves an interactive 3D view in the
@@ -256,8 +337,8 @@ to accommodate noisier GPS.
 
 **Out of GPU memory during training**
 
-Reduce `--pipeline.datamanager.train-num-rays-per-batch` or lower the
-image resolution by increasing `--num-downscales` during preprocessing.
+Reduce `--pipeline.datamanager.train-num-rays-per-batch`, or re-extract
+frames at a lower resolution with ffmpeg's `-vf scale=` filter.
 
 ## References
 
