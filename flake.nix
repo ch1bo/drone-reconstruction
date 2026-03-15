@@ -6,113 +6,120 @@
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
-    flake-utils.lib.eachDefaultSystem
-      (system:
-        {
-          devShells.default =
-            let
-              pkgs = import nixpkgs { inherit system; config = { }; };
-            in
-            pkgs.mkShell {
-              name = "droneReconstructionColmapOnly";
-              buildInputs = with pkgs; [
-                just
-                colmap # Structure-from-Motion
-                ffmpeg-full # Video processing
-              ];
+  outputs =
+    {
+      self,
+      nixpkgs,
+      flake-utils,
+    }:
+    flake-utils.lib.eachDefaultSystem (system: {
+      devShells.default =
+        let
+          pkgs = import nixpkgs {
+            inherit system;
+            config = { };
+          };
+        in
+        pkgs.mkShell {
+          name = "droneReconstructionColmapOnly";
+          buildInputs = with pkgs; [
+            just
+            colmap # Structure-from-Motion
+            ffmpeg-full # Video processing
+          ];
+        };
+
+      # Full pipeline including all cuda dependencies and an impure venv
+      devShells.full =
+        let
+          pkgs = import nixpkgs {
+            inherit system;
+            config = {
+              allowUnfree = true;
+              # These two settings result in a lot of compilation
+              cudaSupport = true;
+              cudaCapabilities = [ "8.9" ]; # RTX 40XX cards
             };
+          };
 
-          # Full pipeline including all cuda dependencies and an impure venv
-          devShells.full =
-            let
-              pkgs = import nixpkgs {
-                inherit system;
-                config = {
-                  allowUnfree = true;
-                  # These two settings result in a lot of compilation
-                  cudaSupport = true;
-                  cudaCapabilities = [ "8.9" ]; # RTX 40XX cards
-                };
-              };
+          # Older version needed for a few nerfstudio dependencies
+          python = pkgs.python312;
 
-              # Older version needed for a few nerfstudio dependencies
-              python = pkgs.python312;
+          # Patch tiny-cuda-nn to respect TCNN_CACHE_PATH environment variable
+          tiny-cuda-nn-patched = python.pkgs.tiny-cuda-nn.overrideAttrs (oldAttrs: {
+            patches = (oldAttrs.patches or [ ]) ++ [
+              ./patches/tiny-cuda-nn-cache-env.patch
+            ];
+          });
 
-              # Patch tiny-cuda-nn to respect TCNN_CACHE_PATH environment variable
-              tiny-cuda-nn-patched = python.pkgs.tiny-cuda-nn.overrideAttrs (oldAttrs: {
-                patches = (oldAttrs.patches or [ ]) ++ [
-                  ./patches/tiny-cuda-nn-cache-env.patch
-                ];
-              });
+          # Python with dependencies for GPS processing
+          pythonDeps = [
+            # GPS integration dependencies
+            python.pkgs.numpy # For numerical operations
+            python.pkgs.scipy # For similarity transform estimation
+            python.pkgs.srt # SRT subtitle parsing (for DJI telemetry)
 
-              # Python with dependencies for GPS processing
-              pythonDeps = [
-                # GPS integration dependencies
-                python.pkgs.numpy # For numerical operations
-                python.pkgs.scipy # For similarity transform estimation
-                python.pkgs.srt # SRT subtitle parsing (for DJI telemetry)
+            # Nerfstudio dependencies
+            python.pkgs.torch
+            tiny-cuda-nn-patched
+          ];
+        in
+        pkgs.mkShell {
+          name = "droneReconstructionFull";
+          venvDir = "./.venv";
+          buildInputs =
+            with pkgs;
+            [
+              just
+              # Core dependencies
+              colmap # Structure-from-Motion
+              ffmpeg-full # Video processing
+              exiftool # DJI metadata extraction
+              imagemagick # Image processing
+              git
+              # Build dependencies
+              pkg-config
+              cmake
+              # CUDA for building tiny-cuda-nn from source
+              cudaPackages.cudatoolkit
+              cudaPackages.cudnn
+              # A Python interpreter including the 'venv' module is required to
+              # bootstrap the environment.
+              python
+              # This executes some shell code to initialize a venv in $venvDir
+              # before dropping into the shell
+              python.pkgs.venvShellHook
+            ]
+            # More python packages (picked up by shell hook)
+            ++ pythonDeps;
 
-                # Nerfstudio dependencies
-                python.pkgs.torch
-                tiny-cuda-nn-patched
-              ];
-            in
-            pkgs.mkShell {
-              name = "droneReconstructionFull";
-              venvDir = "./.venv";
-              buildInputs = with pkgs; [
-                just
-                # Core dependencies
-                colmap # Structure-from-Motion
-                ffmpeg-full # Video processing
-                exiftool # DJI metadata extraction
-                imagemagick # Image processing
-                git
-                # Build dependencies
-                pkg-config
-                cmake
-                # CUDA for building tiny-cuda-nn from source
-                cudaPackages.cudatoolkit
-                cudaPackages.cudnn
-                # A Python interpreter including the 'venv' module is required to
-                # bootstrap the environment.
-                python
-                # This executes some shell code to initialize a venv in $venvDir
-                # before dropping into the shell
-                python.pkgs.venvShellHook
-              ]
-              # More python packages (picked up by shell hook)
-              ++ pythonDeps;
+          # Install nerfstudio via pip as many dependencies are not in nixpkgs
+          postVenvCreation = ''
+            set -e
+            unset SOURCE_DATE_EPOCH
+            pip install --upgrade pip
 
-              # Install nerfstudio via pip as many dependencies are not in nixpkgs
-              postVenvCreation = ''
-                set -e
-                unset SOURCE_DATE_EPOCH
-                pip install --upgrade pip
+            # Install nerfstudio
+            git submodule update --init
+            cd nerfstudio
+            pip install -e .
+          '';
 
-                # Install nerfstudio
-                git submodule update --init
-                cd nerfstudio
-                pip install -e .
-              '';
+          postShellHook = ''
+            # Set writable cache for patched tiny-cuda-nn
+            export TCNN_CACHE_PATH="$PWD/cache/tinycudann"
+            mkdir -p "$TCNN_CACHE_PATH"
+          '';
 
-              postShellHook = ''
-                # Set writable cache for patched tiny-cuda-nn
-                export TCNN_CACHE_PATH="$PWD/cache/tinycudann"
-                mkdir -p "$TCNN_CACHE_PATH"
-              '';
-
-              LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
-                pkgs.libx11
-                pkgs.libudev-zero
-                pkgs.libglvnd
-                pkgs.glib
-                pkgs.xorg.libxcb
-              ];
-            };
-        }
-      );
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+            pkgs.libx11
+            pkgs.libudev-zero
+            pkgs.libglvnd
+            pkgs.glib
+            pkgs.xorg.libxcb
+          ];
+        };
+    });
 
   nixConfig = {
     extra-substituters = [ "https://cache.nixos-cuda.org" ];

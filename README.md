@@ -1,343 +1,272 @@
 # Drone 3D Reconstruction
 
-A modern pipeline for creating high-quality 3D reconstructions of neighborhoods and outdoor environments from monocular drone video footage using Neural Radiance Fields (NeRF) and 3D Gaussian Splatting.
+A pipeline for creating 3D reconstructions from DJI drone video footage,
+using Structure-from-Motion (COLMAP) for camera pose estimation and 3D
+Gaussian Splatting (via Nerfstudio) for the final neural reconstruction.
 
-## Overview
+## Goal
 
-This project provides a streamlined workflow for offline 3D reconstruction from DJI drone 4K video feeds. It combines classical structure-from-motion (COLMAP) with GPS telemetry data from DJI SRT files to create metric-scale, georeferenced 3D models using state-of-the-art neural rendering (NeRF and 3D Gaussian Splatting).
+The aim is to fly a drone over a site, feed the video into this pipeline,
+and get back a walkable 3D model with real-world scale and geographic
+positioning. "Real-world scale" means measurements in meters; "geographic
+positioning" means the model is oriented and placed according to GPS
+coordinates, so it could be overlaid on a map.
 
-**Key Features:**
-- Automatic GPS/altitude extraction from DJI SRT subtitle files
-- COLMAP-based reconstruction with GPS alignment
-- Metric scale (real-world measurements in meters)
-- Georeferenced output (East-North-Up coordinate system)
-- High-precision altitude using drone's infrared sensor
+The immediate use case is neighborhood-scale outdoor scenes — a few hundred
+meters across, flown at moderate altitude. Indoor scenes and close-range
+detail work are out of scope.
 
-## Workflow
+## Setup
 
-### Processing Pipeline
+The environment is managed with [Nix flakes](https://nixos.wiki/wiki/Flakes).
+There are two shells:
 
-```bash
-# 1. Setup environment
-nix develop
+```
+nix develop          # lightweight: colmap, ffmpeg
+nix develop .#full   # full pipeline including CUDA + nerfstudio
+```
 
-# 2. Process video with GPS alignment (one command does everything)
-./scripts/process_with_gps.sh \
-  --video ./input/DJI_20260117094312_0018_D.MP4 \
-  --srt ./input/DJI_20260117094312_0018_D.SRT \
-  --output ./data/processed_scene
+The split exists because the full shell takes a long time to build the
+first time (it compiles CUDA kernels) and requires an NVIDIA GPU. Day-to-day
+exploration of COLMAP outputs, tweaking scripts, or reading this document
+does not need the full shell.
 
-# This automatically:
-#   - Extracts GPS/altitude from SRT
-#   - Runs COLMAP reconstruction
-#   - Aligns to GPS coordinates
-#   - Produces metric-scale, georeferenced model
+[`direnv`](https://direnv.net/) is configured via `.envrc` to auto-activate
+the default shell when you `cd` into the project.
 
-# 3. Inspect alignment (optional)
+### Why Nix
+
+Nerfstudio and its dependencies (PyTorch, tiny-cuda-nn, etc.) are
+notoriously painful to install consistently. Nix pins exact versions and
+makes the environment reproducible across machines. The tradeoff is a slower
+first-time setup, but subsequent `nix develop` calls are instant (assuming
+the binary cache is available).
+
+The Nix binary cache `cache.nixos-cuda.org` (configured in `flake.nix`) is
+used to avoid recompiling CUDA packages from source on every machine.
+
+### tiny-cuda-nn cache
+
+`tiny-cuda-nn` compiles CUDA kernels at runtime using JIT compilation. By
+default it writes these to a path inside the Python package directory, which
+is read-only in the Nix store. The patch in
+`patches/tiny-cuda-nn-cache-env.patch` makes it respect a
+`TCNN_CACHE_PATH` environment variable instead. The `full` devshell sets
+this to `./cache/tinycudann` so compiled kernels land in the project
+directory and persist across shell sessions.
+
+### Nerfstudio as a submodule
+
+Nerfstudio itself is installed via `pip install -e .` from a git submodule
+at `nerfstudio/`. This happens automatically the first time the `full` shell
+is created (`postVenvCreation` in `flake.nix`). The submodule approach
+allows pinning to a specific commit and applying local patches if needed.
+
+## Pipeline
+
+The full pipeline, from raw drone footage to a 3D model, has two major
+phases: **preprocessing** (CPU-bound, runs anywhere) and **training**
+(GPU-bound, needs an NVIDIA card).
+
+```
+DJI video (.MP4) + telemetry (.SRT)
+        │
+        ▼
+  ns-process-data           ← nerfstudio wrapper around COLMAP
+        │  extracts frames, runs COLMAP feature extraction,
+        │  matching, and sparse reconstruction
+        │
+        ▼
+  GPS alignment             ← align_existing_reconstruction.sh
+        │  reads GPS from .SRT, aligns COLMAP model using
+        │  COLMAP model_aligner (Sim3 fit to GPS positions)
+        │
+        ▼
+  transforms.json           ← georeferenced camera poses + intrinsics
+        │
+        ▼
+  ns-train splatfacto       ← 3D Gaussian Splatting training
+        │
+        ▼
+  ns-viewer / ns-export     ← interactive viewing or mesh/point cloud export
+```
+
+### Step 1: Preprocessing with ns-process-data
+
+```sh
+ns-process-data video \
+  --data input/DJI_20260117094312_0018_D.MP4 \
+  --output-dir data/scene01 \
+  --num-downscales 0 \
+  --matching-method sequential \
+  --num-frames-target 1000
+```
+
+This runs `ns-process-data video`, which:
+
+1. Extracts `N` frames from the video with ffmpeg (default: 1000 frames,
+   evenly spaced)
+2. Runs COLMAP feature extraction, sequential matching, and sparse
+   reconstruction
+3. Outputs `data/processed/transforms.json` with camera poses + intrinsics
+
+**Sequential matching** is used instead of exhaustive matching because drone
+footage is a continuous flyover — nearby frames share the most features.
+Exhaustive matching compares all pairs and is O(n²); sequential is much
+faster for video.
+
+**`--num-downscales 0`** is set so COLMAP works at full resolution. Downscaled
+variants take up disk space and are not needed here.
+
+### Step 2: GPS alignment
+
+```sh
+./scripts/align_existing_reconstruction.sh \
+  --srt input/DJI_20260117094312_0018_D.SRT \
+  --data data/scene01
+```
+
+This script:
+
+1. Parses the `.SRT` telemetry file (`scripts/parse_srt.py`) to extract
+   GPS coordinates and altitude for each video frame
+2. Creates a reference poses file (`scripts/create_reference_poses.py`)
+   mapping frame filenames to GPS positions, in the format COLMAP's
+   `model_aligner` expects
+3. Runs `colmap model_aligner` to fit a **Sim3** (similarity) transform —
+   rotation, translation, and a single global scale factor — between the
+   COLMAP reconstruction and the GPS positions
+4. Updates `transforms.json` with the aligned (georeferenced) camera poses
+   (`scripts/update_transforms.py`)
+
+**Why Sim3 and not just translation?** COLMAP from monocular video produces
+poses that are correct up to an unknown scale. GPS provides the real-world
+scale. The Sim3 fit recovers rotation (to align orientation), translation
+(to place the model geographically), and scale (to make distances real-world
+meters) all at once.
+
+**Coordinate system: ENU.** The aligned model uses an East-North-Up local
+coordinate system with its origin at the first camera position. ENU is a
+right-handed, metric coordinate system standard in surveying and robotics.
+ECEF (Earth-Centered-Earth-Fixed) is the alternative, but ENU is more
+intuitive for a local scene.
+
+**Altitude: relative, not absolute.** DJI SRT files contain both
+`rel_alt` (height above the takeoff point, from the drone's infrared
+altimeter, ~0.1 m precision) and `abs_alt` (MSL altitude from GPS,
+~10–20 m precision). The pipeline uses `rel_alt` by default because its
+much higher precision gives a better scale estimate. The vertical axis in
+the final model is therefore height above takeoff, not sea level.
+
+**GPS accuracy.** Consumer GPS horizontal accuracy is ~5 m. That is the
+dominant source of error in the final model's geographic positioning.
+Relative distances within the model (measured from COLMAP, not GPS) are
+sub-meter accurate.
+
+### Step 3: Training
+
+```sh
+ns-train splatfacto --data data/scene01 --output-dir outputs/
+```
+
+This trains a 3D Gaussian Splatting model. Training takes 30–60 minutes on an RTX 4070 Ti.
+
+**Why Gaussian Splatting over NeRF?** For large outdoor scenes, Gaussian
+Splatting trains faster (~30 min vs. 2–8 hours for a full NeRF), renders in
+real time (suitable for interactive exploration), and produces comparable
+visual quality. NeRF variants like Zip-NeRF may give better results for
+scenes with fine detail, but the speed tradeoff is steep. `splatfacto` is
+Nerfstudio's implementation and well-maintained.
+
+### Viewing and exporting
+
+```sh
+# Interactive viewer (serves in browser)
+ns-viewer --load-config outputs/scene01/splatfacto/<timestamp>/config.yml
+
+# Inspect COLMAP sparse reconstruction
 colmap gui \
-  --database_path ./data/processed_scene/colmap/database.db \
-  --import_path ./data/processed_scene/colmap/sparse/1 \
-  --image_path ./data/processed_scene/images
+  --import_path data/scene01/colmap/sparse/0 \
+  --database_path data/scene01/database.db \
+  --image_path data/scene01/images
 
-# 4. Train 3D Gaussian Splatting on GPU machine
-ns-train splatfacto \
-  --data ./data/processed_scene \
-  --output-dir ./outputs/scene_01
+# Render a saved camera path
+ns-render camera-path \
+  --load-config outputs/scene01/splatfacto/<timestamp>/config.yml \
+  --camera-path-filename cameras/path.json \
+  --output-path renders/scene01.mp4
 
-# 5. View results interactively
-ns-viewer --load-config ./outputs/scene_01/config.yml
-
-# 6. Export georeferenced point cloud
+# Export point cloud
 ns-export pointcloud \
-  --load-config ./outputs/scene_01/config.yml \
-  --output-dir ./exports/scene_01
+  --load-config outputs/scene01/splatfacto/<timestamp>/config.yml \
+  --output-dir exports/scene01
+
+# Export mesh
+ns-export poisson \
+  --load-config outputs/scene01/splatfacto/<timestamp>/config.yml \
+  --output-dir exports/scene01
 ```
 
-### Manual Step-by-Step
+The nerfstudio viewer (`ns-viewer`) serves an interactive 3D view in the
+browser. Camera paths for rendering can be defined in the viewer and saved
+as JSON files.
 
-For more control or troubleshooting, run individual scripts:
+## DJI SRT telemetry format
 
-```bash
-# 1. Extract GPS from SRT
-python scripts/parse_srt.py \
-  --srt input/DJI_flight.SRT \
-  --video input/DJI_flight.MP4 \
-  --output data/gps_data.json
-
-# 2. Run COLMAP reconstruction (or use ns-process-data)
-# ... (see docs/gps_workflow.md)
-
-# 3. Create GPS reference poses
-python scripts/create_reference_poses.py \
-  --gps-data data/gps_data.json \
-  --output data/reference_poses.txt
-
-# 4. Align to GPS
-python scripts/align_to_gps.py \
-  --input data/colmap/sparse/0 \
-  --output data/colmap/aligned \
-  --reference data/reference_poses.txt
-
-# 5. Update transforms.json
-python scripts/update_transforms.py \
-  --aligned-colmap data/colmap/aligned \
-  --transforms data/transforms.json
-```
-
-See [docs/gps_workflow.md](docs/gps_workflow.md) for detailed documentation and troubleshooting.
-
-### Hardware Requirements
-
-- **GPU**: NVIDIA GPU with 12GB+ VRAM (tested on RTX 4070Ti)
-- **CPU**: Multi-core processor (32 cores recommended for COLMAP)
-- **RAM**: 64GB recommended for large scenes
-- **Storage**: ~10-50GB per scene depending on video length and resolution
-
-### Expected Processing Times (on RTX 4070Ti)
-
-- Video preprocessing + COLMAP: 30-60 minutes (CPU-bound)
-- Gaussian Splatting training: 30-60 minutes
-- NeRF training: 2-8 hours
-- Real-time viewing: 30-60 FPS
-
-## How It Works
-
-### Pipeline Architecture
+DJI drones embed per-frame GPS and sensor data in `.SRT` subtitle files
+alongside the video. Modern firmware uses the format:
 
 ```
-DJI Drone Video (4K) + SRT Telemetry
-    ├── GPS/Altitude Extraction (parse_srt.py)
-    └── Frame Extraction (ffmpeg)
-          ↓
-    COLMAP (Structure-from-Motion)
-    ├── Feature Detection & Matching
-    ├── Sparse Reconstruction
-    └── Camera Pose Estimation
-          ↓
-    GPS Alignment (model_aligner)
-    ├── Sim3 transform estimation (rotation + translation + scale)
-    ├── Metric scale from GPS
-    └── Georeferencing to ENU coordinates
-          ↓
-    Neural Reconstruction
-    ├── 3D Gaussian Splatting (fast, recommended)
-    └── NeRF variants (high quality, slower)
-          ↓
-    Metric-scale, Georeferenced 3D Model
+[latitude: 47.327540] [longitude: 9.603926] [rel_alt: 4.000 abs_alt: 377.161]
 ```
 
-### Key Components
-
-#### 1. Structure-from-Motion (COLMAP)
-
-COLMAP estimates camera poses and sparse 3D structure from video frames:
-- Extracts and matches SIFT features across frames
-- Performs incremental bundle adjustment
-- Outputs camera intrinsics, extrinsics, and sparse point cloud
-- Handles scale ambiguity better than pure monocular SLAM
-
-#### 2. Neural Radiance Fields (NeRF)
-
-NeRF represents scenes as continuous 5D functions (3D position + 2D viewing direction → RGB + density):
-- **Pros**: Photorealistic novel view synthesis, continuous representation
-- **Cons**: Slow rendering (requires many neural network queries per pixel)
-- **Training**: 2-8 hours for neighborhood-scale scenes
-- **Use case**: When rendering quality is paramount and speed is secondary
-
-#### 3. 3D Gaussian Splatting
-
-Represents scenes as collections of 3D Gaussian primitives with learned parameters:
-- **Pros**: Real-time rendering (100-1000x faster than NeRF), faster training
-- **Cons**: Discrete representation (millions of Gaussians)
-- **Training**: 30-60 minutes for large outdoor scenes
-- **Use case**: Large-scale outdoor reconstructions, interactive viewing
-
-### Technical Background
-
-**Why Neural Methods Work Well for Drone Footage**
-
-- Handle large-scale outdoor scenes with varying lighting
-- Robust to sparse view sampling (drone doesn't capture every angle)
-- Deal with sky, foliage, and other challenging materials
-- Produce complete, watertight reconstructions without explicit meshing
-
-## Libraries and Tools
-
-### Core Dependencies
-
-- **[Nerfstudio](https://github.com/nerfstudio-project/nerfstudio)** - Unified framework for NeRF and Gaussian Splatting
-  - Modular architecture supporting multiple methods
-  - Built-in viewer and export tools
-  - Active development and community
-
-- **[COLMAP](https://colmap.github.io/)** - Structure-from-Motion and Multi-View Stereo
-  - Industry standard for camera pose estimation
-  - Integrated into Nerfstudio preprocessing pipeline
-
-### Alternative Implementations
-
-- **[gaussian-splatting](https://github.com/graphdeco-inria/gaussian-splatting)** - Original Gaussian Splatting implementation
-- **[Instant-NGP](https://github.com/NVlabs/instant-ngp)** - NVIDIA's fast NeRF implementation
-- **[ORB-SLAM3](https://github.com/UZ-SLAMLab/ORB_SLAM3)** - If you need real-time SLAM
-- **[DROID-SLAM](https://github.com/princeton-vl/DROID-SLAM)** - Deep learning-based SLAM
-
-## Key Papers and References
-
-### Neural Rendering Foundations
-
-1. **NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis**  
-   Mildenhall et al., ECCV 2020  
-   [Paper](https://arxiv.org/abs/2003.08934) | [Project Page](https://www.matthewtancik.com/nerf)  
-   *The foundational work that started the neural rendering revolution*
-
-2. **3D Gaussian Splatting for Real-Time Radiance Field Rendering**  
-   Kerbl et al., SIGGRAPH 2023  
-   [Paper](https://arxiv.org/abs/2308.04079) | [Project Page](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/)  
-   *Current state-of-the-art for fast, high-quality reconstruction*
-
-### Large-Scale Scene Reconstruction
-
-3. **Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields**  
-   Barron et al., CVPR 2022  
-   [Paper](https://arxiv.org/abs/2111.12077)  
-   *Specifically designed for large outdoor unbounded scenes*
-
-4. **Zip-NeRF: Anti-Aliased Grid-Based Neural Radiance Fields**  
-   Barron et al., ICCV 2023  
-   [Paper](https://arxiv.org/abs/2304.06706)  
-   *Improved quality for detailed outdoor scenes*
-
-### Structure-from-Motion
-
-5. **Structure-from-Motion Revisited**  
-   Schönberger & Frahm, CVPR 2016  
-   [Paper](https://demuc.de/papers/schoenberger2016sfm.pdf)  
-   *The paper behind COLMAP*
-
-### Hybrid SLAM + Neural Approaches
-
-6. **NICE-SLAM: Neural Implicit Scalable Encoding for SLAM**  
-   Zhu et al., CVPR 2022  
-   [Paper](https://arxiv.org/abs/2112.12130)  
-   *If you need real-time tracking with neural reconstruction*
-
-7. **Point-SLAM: Dense Neural Point Cloud-based SLAM**  
-   Sandström et al., ICCV 2023  
-   [Paper](https://arxiv.org/abs/2304.04278)  
-   *Recent work combining classical SLAM robustness with neural quality*
-
-## GPS-Aligned Reconstruction
-
-DJI drones embed GPS, IMU, and altitude telemetry in SRT subtitle files alongside the video. This project leverages this data to create metric-scale, georeferenced 3D models.
-
-### What You Get
-
-- **Metric Scale**: Real-world measurements in meters (not arbitrary units)
-- **Georeferencing**: Model positioned in GPS coordinate system (ENU)
-- **Precise Altitude**: Uses drone's infrared altimeter (~0.1m precision) for vertical scale
-- **GIS-Compatible**: Export models with geographic coordinates for mapping applications
-
-### How It Works
-
-1. **GPS Extraction** (`scripts/parse_srt.py`): Parses DJI SRT files to extract latitude, longitude, and altitude per frame
-2. **COLMAP Reconstruction**: Standard structure-from-motion for precise relative camera poses
-3. **GPS Alignment** (`scripts/align_to_gps.py`): Uses COLMAP's `model_aligner` to estimate similarity transform (Sim3) between COLMAP and GPS
-4. **Transform Update** (`scripts/update_transforms.py`): Updates camera poses with metric, georeferenced coordinates
-
-**Accuracy:** Consumer GPS provides ~5m horizontal, but combined with COLMAP's precision and accurate altitude data, the final model has:
-- Horizontal positioning: ±5m (GPS limited)
-- Vertical scale: ±0.1-0.5m (infrared altimeter + COLMAP)
-- Relative measurements: Sub-meter accuracy (COLMAP quality)
-
-### Processing Scripts
-
-All scripts are in `scripts/`:
-
-- `process_with_gps.sh` - End-to-end automated workflow
-- `parse_srt.py` - Extract GPS/altitude from DJI SRT files
-- `create_reference_poses.py` - Convert GPS to COLMAP format
-- `align_to_gps.py` - Align reconstruction to GPS coordinates
-- `update_transforms.py` - Update transforms.json with aligned poses
-
-See [GPS Workflow Guide](docs/gps_workflow.md) for detailed usage and troubleshooting.
-
-## Project Structure
+Older firmware used:
 
 ```
-├── README.md
-├── flake.nix                      # Nix environment configuration
-├── input/                         # Raw drone videos + SRT files
-│   ├── DJI_*.mp4                  # DJI drone videos
-│   └── DJI_*.SRT                  # DJI telemetry (GPS/altitude)
-├── data/                          # Processed datasets
-│   └── processed_scene/
-│       ├── images/                # Extracted video frames
-│       ├── colmap/                # COLMAP outputs
-│       │   ├── sparse/0/          # Original reconstruction
-│       │   └── aligned/           # GPS-aligned reconstruction
-│       ├── gps_data.json          # Parsed GPS telemetry
-│       ├── reference_poses.txt    # GPS poses for alignment
-│       └── transforms.json        # Camera poses (georeferenced)
-├── outputs/                       # Trained NeRF/Gaussian Splatting models
-│   └── scene_01/
-│       ├── config.yml
-│       └── nerfstudio_models/
-├── exports/                       # Exported meshes, point clouds
-├── scripts/                       # GPS processing pipeline
-│   ├── process_with_gps.sh        # End-to-end workflow
-│   ├── parse_srt.py               # Extract GPS from SRT
-│   ├── create_reference_poses.py  # Convert to COLMAP format
-│   ├── align_to_gps.py            # Run GPS alignment
-│   └── update_transforms.py       # Update with aligned poses
-└── docs/
-    └── gps_workflow.md            # Detailed GPS workflow guide
+GPS(47.327540,9.603926,377.161)
 ```
 
-## Features
+`scripts/parse_srt.py` handles both formats. It interpolates telemetry to
+match each extracted video frame's timestamp (the SRT entries are
+one-per-second; the extracted frames may be at sub-second intervals). The
+Python `srt` library handles subtitle parsing; the telemetry values are
+extracted with regexes.
 
-- [x] GPS-aligned reconstruction with metric scale
-- [x] Automatic DJI SRT telemetry parsing
-- [x] Georeferenced 3D models (ENU coordinate system)
-- [x] Infrared altimeter integration for precise vertical scale
+## Common issues
 
-## Future Enhancements
+**COLMAP fails on a headless server (no display)**
 
-- [ ] GPU-accelerated COLMAP for faster preprocessing
-- [ ] Multi-video fusion for complete neighborhood coverage
-- [ ] RTK GPS support for centimeter-level accuracy
-- [ ] Automated flight path planning for optimal coverage
-- [ ] Web-based 3D viewer for sharing results
-- [ ] GIS export formats (GeoTIFF, LAS with coordinates)
-- [ ] Change detection across different flight dates
+COLMAP links against Qt and tries to initialise a display even in CLI mode.
+Set `QT_QPA_PLATFORM=offscreen` before running any COLMAP command.
 
-## Troubleshooting
+**COLMAP fails on a headless server (OpenGL)**
 
-### Common Issues
+Feature extraction uses OpenGL by default for GPU acceleration. On a
+headless server without a display or proper GPU passthrough this fails. Add
+`--FeatureExtraction.use_gpu 0` and `--FeatureMatching.use_gpu 0` to the
+relevant COLMAP commands, or pass `--cpu` to `align_existing_reconstruction.sh`.
+CPU mode is 2–3× slower but works everywhere.
 
-**Out of Memory Errors**
-- Reduce `--max-num-iterations` for training
-- Lower resolution with `--pipeline.datamanager.train-num-rays-per-batch`
-- Use `--pipeline.model.predict-normals False` to save memory
+**Alignment fails: "not enough inliers"**
 
-**Poor Reconstruction Quality**
-- Ensure sufficient overlap between video frames (70%+ recommended)
-- Check COLMAP results - if sparse reconstruction fails, the video quality may be insufficient
-- Increase video bitrate for future flights
-- Fly slower with more stable camera motion
+The GPS track and COLMAP trajectory don't match well enough for RANSAC to
+find an inlier set. First check that the SRT file corresponds to the correct
+video. If it does, try increasing `--max-error` from 10 to 15 or 20 metres
+to accommodate noisier GPS.
 
-**COLMAP Fails**
-- Video may have motion blur - fly slower or increase shutter speed
-- Insufficient texture in scene (e.g., blank walls)
-- Try adjusting COLMAP feature extraction parameters
+**Out of GPU memory during training**
 
-## Contributing
+Reduce `--pipeline.datamanager.train-num-rays-per-batch` or lower the
+image resolution by increasing `--num-downscales` during preprocessing.
 
-This is a personal project, but suggestions and improvements are welcome through issues and pull requests.
+## References
 
-## License
-
-Apache-2.0
-
-## Acknowledgments
-
-Built on the excellent work of the Nerfstudio team and the broader neural rendering community. Special thanks to the authors of the referenced papers for making their code available.
+- [Nerfstudio](https://docs.nerf.studio/) — the framework used for training
+  and export
+- [COLMAP](https://colmap.github.io/) — structure-from-motion library
+- [3D Gaussian Splatting](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/)
+  — the reconstruction method (Kerbl et al., SIGGRAPH 2023)
+- [NeRF](https://www.matthewtancik.com/nerf) — the earlier neural rendering
+  approach this builds on (Mildenhall et al., ECCV 2020)
+- [DJI SRT format](https://github.com/JuanIrache/DJI_SRT_Parser) — community
+  documentation of the telemetry format
