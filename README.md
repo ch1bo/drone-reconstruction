@@ -95,12 +95,12 @@ DJI video (.MP4) + telemetry (.SRT)
 ### Frame extraction
 
 ```sh
-mkdir -p data/haggenfeld1/images
+mkdir -p data/flight1/images
 
-ffmpeg -i input/DJI_20260117094312_0018_D.MP4 \
+ffmpeg -i input/DJI_20260117094704_0020_D.MP4 \
   -vf fps=2 \
   -q:v 2 \
-  data/haggenfeld1/images/frame_%06d.jpg
+  data/flight1/images/frame_%06d.jpg
 ```
 
 `fps=2` extracts 2 frames per second. For a 5-minute flight at normal
@@ -113,22 +113,27 @@ on the images directly, so quality matters more here than disk space.
 ### Sparse reconstruction with COLMAP
 
 ```sh
+mkdir -p data/flight1/colmap/
+
 # Feature extraction — SIFT keypoints for each image
 colmap feature_extractor \
-  --database_path data/haggenfeld1/colmap/database.db \
-  --image_path data/haggenfeld1/images \
+  --database_path data/flight1/colmap/database.db \
+  --image_path data/flight1/images \
   --ImageReader.camera_model OPENCV \
-  --ImageReader.single_camera 1
+  --ImageReader.single_camera 1 \
+  --FeatureExtraction.use_gpu 1
 
 # Sequential matching — matches each frame to its neighbours only
 colmap sequential_matcher \
-  --database_path data/haggenfeld1/colmap/database.db
+  --database_path data/flight1/colmap/database.db \
+  --FeatureMatching.use_gpu 1
 
 # Sparse reconstruction — estimates camera poses and 3D point cloud
+mkdir -p data/flight1/colmap/sparse
 colmap mapper \
-  --database_path data/haggenfeld1/colmap/database.db \
-  --image_path data/haggenfeld1/images \
-  --output_path data/haggenfeld1/colmap/sparse
+  --database_path data/flight1/colmap/database.db \
+  --image_path data/flight1/images \
+  --output_path data/flight1/colmap/sparse
 ```
 
 `single_camera 1` tells COLMAP all images share the same intrinsics (one
@@ -150,30 +155,34 @@ Inspect the result:
 
 ```sh
 colmap gui \
-  --import_path data/haggenfeld1/colmap/sparse/0 \
-  --database_path data/haggenfeld1/colmap/database.db \
-  --image_path data/haggenfeld1/images
+  --import_path data/flight1/colmap/sparse/0 \
+  --database_path data/flight1/colmap/database.db \
+  --image_path data/flight1/images
 ```
 
 ### GPS alignment
 
 ```sh
-./scripts/align_existing_reconstruction.sh \
+# Parse SRT and write a reference poses file for colmap model_aligner
+python scripts/srt_to_reference_poses.py \
   --srt input/DJI_20260117094312_0018_D.SRT \
-  --data data/haggenfeld1
+  --video input/DJI_20260117094312_0018_D.MP4 \
+  --fps 2 \
+  --output data/flight1/reference_poses.txt
+
+# Fit a Sim3 transform between the COLMAP reconstruction and the GPS positions
+colmap model_aligner \
+  --input_path data/flight1/colmap/sparse/0 \
+  --output_path data/flight1/colmap/aligned \
+  --ref_images_path data/flight1/reference_poses.txt \
+  --ref_is_gps 1 \
+  --alignment_type enu \
+  --alignment_max_error 10
 ```
 
-This script:
-
-1. Parses the `.SRT` telemetry file (`scripts/parse_srt.py`) to extract
-   GPS coordinates and altitude for each video frame
-2. Creates a reference poses file (`scripts/create_reference_poses.py`)
-   mapping frame filenames to GPS positions, in the format COLMAP's
-   `model_aligner` expects
-3. Runs `colmap model_aligner` to fit a **Sim3** (similarity) transform —
-   rotation, translation, and a single global scale factor — between the
-   COLMAP reconstruction and the GPS positions
-4. Writes the aligned model to `colmap/aligned/`
+The aligned model lands in `colmap/aligned/`, in the same binary format as
+`colmap/sparse/0` — it can be inspected in the COLMAP GUI or passed to any
+subsequent step in place of the unaligned model.
 
 **Why Sim3 and not just translation?** COLMAP from monocular video produces
 poses that are correct up to an unknown scale. GPS provides the real-world
@@ -213,23 +222,23 @@ GPS-aligned model:
 ```sh
 # Prepare undistorted workspace for MVS
 colmap image_undistorter \
-  --image_path data/haggenfeld1/images \
-  --input_path data/haggenfeld1/colmap/aligned \
-  --output_path data/haggenfeld1/dense \
+  --image_path data/flight1/images \
+  --input_path data/flight1/colmap/aligned \
+  --output_path data/flight1/dense \
   --output_type COLMAP
 
 # Compute depth maps (requires CUDA, run in nix develop .#full)
 colmap patch_match_stereo \
-  --workspace_path data/haggenfeld1/dense \
+  --workspace_path data/flight1/dense \
   --workspace_type COLMAP \
   --PatchMatchStereo.geom_consistency true
 
 # Fuse depth maps into a single point cloud
 colmap stereo_fusion \
-  --workspace_path data/haggenfeld1/dense \
+  --workspace_path data/flight1/dense \
   --workspace_type COLMAP \
   --input_type geometric \
-  --output_path data/haggenfeld1/dense/fused.ply
+  --output_path data/flight1/dense/fused.ply
 ```
 
 The output `fused.ply` is a coloured point cloud in the same coordinate
@@ -245,7 +254,7 @@ frames expect several GB of working set.
 
 ```sh
 ns-train splatfacto \
-  --data data/haggenfeld1 \
+  --data data/flight1 \
   --output-dir outputs/ \
   colmap-data-parser-config \
     --colmap-path colmap/aligned
@@ -269,23 +278,23 @@ Nerfstudio's implementation and well-maintained.
 
 ```sh
 # Interactive viewer (serves in browser)
-ns-viewer --load-config outputs/haggenfeld1/splatfacto/<timestamp>/config.yml
+ns-viewer --load-config outputs/flight1/splatfacto/<timestamp>/config.yml
 
 # Render a saved camera path
 ns-render camera-path \
-  --load-config outputs/haggenfeld1/splatfacto/<timestamp>/config.yml \
+  --load-config outputs/flight1/splatfacto/<timestamp>/config.yml \
   --camera-path-filename cameras/path.json \
-  --output-path renders/haggenfeld1.mp4
+  --output-path renders/flight1.mp4
 
 # Export point cloud from the Gaussian model
 ns-export pointcloud \
-  --load-config outputs/haggenfeld1/splatfacto/<timestamp>/config.yml \
-  --output-dir exports/haggenfeld1
+  --load-config outputs/flight1/splatfacto/<timestamp>/config.yml \
+  --output-dir exports/flight1
 
 # Export mesh
 ns-export poisson \
-  --load-config outputs/haggenfeld1/splatfacto/<timestamp>/config.yml \
-  --output-dir exports/haggenfeld1
+  --load-config outputs/flight1/splatfacto/<timestamp>/config.yml \
+  --output-dir exports/flight1
 ```
 
 The nerfstudio viewer (`ns-viewer`) serves an interactive 3D view in the
@@ -307,10 +316,10 @@ Older firmware used:
 GPS(47.327540,9.603926,377.161)
 ```
 
-`scripts/parse_srt.py` handles both formats. It interpolates telemetry to
-match each extracted video frame's timestamp (the SRT entries are
-one-per-second; the extracted frames may be at sub-second intervals). The
-Python `srt` library handles subtitle parsing; the telemetry values are
+`scripts/srt_to_reference_poses.py` handles both formats. It interpolates
+telemetry to match each extracted video frame's timestamp (the SRT entries
+are one-per-second; the extracted frames may be at sub-second intervals).
+The Python `srt` library handles subtitle parsing; the telemetry values are
 extracted with regexes.
 
 ## Common issues

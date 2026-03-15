@@ -19,13 +19,26 @@
             inherit system;
             config = { };
           };
+
+          python = pkgs.python3;
+
+          # Python with dependencies for GPS processing
+          pythonDeps = [
+            # GPS integration dependencies
+            python.pkgs.numpy # For numerical operations
+            python.pkgs.scipy # For similarity transform estimation
+            python.pkgs.srt # SRT subtitle parsing (for DJI telemetry)
+          ];
         in
         pkgs.mkShell {
           name = "droneReconstructionColmapOnly";
-          buildInputs = with pkgs; [
-            colmap # Structure-from-Motion
-            ffmpeg-full # Video processing
-          ];
+          buildInputs =
+            with pkgs;
+            [
+              colmap # Structure-from-Motion
+              ffmpeg-full # Video processing
+            ]
+            ++ pythonDeps;
         };
 
       # Full pipeline including all cuda dependencies and an impure venv
