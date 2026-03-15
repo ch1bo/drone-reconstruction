@@ -71,9 +71,9 @@
             python.pkgs.scipy # For similarity transform estimation
             python.pkgs.srt # SRT subtitle parsing (for DJI telemetry)
 
-            # Nerfstudio dependencies
-            python.pkgs.torch
-            tiny-cuda-nn-patched
+            # TODO: re-enable Nerfstudio dependencies
+            # python.pkgs.torch
+            # tiny-cuda-nn-patched
           ];
         in
         pkgs.mkShell {
@@ -99,7 +99,7 @@
               python
               # This executes some shell code to initialize a venv in $venvDir
               # before dropping into the shell
-              python.pkgs.venvShellHook
+              # TODO: re-enable python.pkgs.venvShellHook
             ]
             # More python packages (picked up by shell hook)
             ++ pythonDeps;

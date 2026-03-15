@@ -113,11 +113,11 @@ on the images directly, so quality matters more here than disk space.
 ### Sparse reconstruction with COLMAP
 
 ```sh
-mkdir -p data/flight1/colmap/
+mkdir -p data/flight1/sparse
 
 # Feature extraction — SIFT keypoints for each image
 colmap feature_extractor \
-  --database_path data/flight1/colmap/database.db \
+  --database_path data/flight1/database.db \
   --image_path data/flight1/images \
   --ImageReader.camera_model OPENCV \
   --ImageReader.single_camera 1 \
@@ -125,15 +125,14 @@ colmap feature_extractor \
 
 # Sequential matching — matches each frame to its neighbours only
 colmap sequential_matcher \
-  --database_path data/flight1/colmap/database.db \
+  --database_path data/flight1/database.db \
   --FeatureMatching.use_gpu 1
 
 # Sparse reconstruction — estimates camera poses and 3D point cloud
-mkdir -p data/flight1/colmap/sparse
 colmap mapper \
-  --database_path data/flight1/colmap/database.db \
+  --database_path data/flight1/database.db \
   --image_path data/flight1/images \
-  --output_path data/flight1/colmap/sparse
+  --output_path data/flight1/sparse
 ```
 
 `single_camera 1` tells COLMAP all images share the same intrinsics (one
@@ -155,8 +154,8 @@ Inspect the result:
 
 ```sh
 colmap gui \
-  --import_path data/flight1/colmap/sparse/0 \
-  --database_path data/flight1/colmap/database.db \
+  --import_path data/flight1/sparse/0 \
+  --database_path data/flight1/database.db \
   --image_path data/flight1/images
 ```
 
@@ -172,8 +171,8 @@ python scripts/srt_to_reference_poses.py \
 
 # Fit a Sim3 transform between the COLMAP reconstruction and the GPS positions
 colmap model_aligner \
-  --input_path data/flight1/colmap/sparse/0 \
-  --output_path data/flight1/colmap/aligned \
+  --input_path data/flight1/sparse/0 \
+  --output_path data/flight1/aligned \
   --ref_images_path data/flight1/reference_poses.txt \
   --ref_is_gps 1 \
   --alignment_type enu \
@@ -223,20 +222,18 @@ GPS-aligned model:
 # Prepare undistorted workspace for MVS
 colmap image_undistorter \
   --image_path data/flight1/images \
-  --input_path data/flight1/colmap/aligned \
+  --input_path data/flight1/aligned \
   --output_path data/flight1/dense \
   --output_type COLMAP
 
 # Compute depth maps (requires CUDA, run in nix develop .#full)
 colmap patch_match_stereo \
   --workspace_path data/flight1/dense \
-  --workspace_type COLMAP \
   --PatchMatchStereo.geom_consistency true
 
 # Fuse depth maps into a single point cloud
 colmap stereo_fusion \
   --workspace_path data/flight1/dense \
-  --workspace_type COLMAP \
   --input_type geometric \
   --output_path data/flight1/dense/fused.ply
 ```
