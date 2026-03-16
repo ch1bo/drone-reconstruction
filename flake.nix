@@ -20,6 +20,21 @@
             config = { };
           };
 
+          # Fix null meta_data_ crash in patch_match_stereo.
+          #
+          # The nixpkgs openimageio.patch introduces OIIOMetaData::Clone() calls
+          # in Bitmap's copy constructor and copy assignment operator without
+          # guarding against null meta_data_. A default-constructed Bitmap() has
+          # meta_data_ == nullptr. Copying such an empty Bitmap (which happens
+          # when model.images is vector-copied in patch_match.cc) crashes with:
+          #   'dynamic_cast<OIIOMetaData*>(meta_data)' Must be non NULL
+          # This matches the fix on colmap main branch (post PR #3459).
+          colmap-fixed = pkgs.colmap.overrideAttrs (old: {
+            patches = (old.patches or [ ]) ++ [
+              ./patches/colmap-bitmap-oiio-copy.patch
+            ];
+          });
+
           python = pkgs.python3;
 
           # Python with dependencies for GPS processing
@@ -35,7 +50,7 @@
           buildInputs =
             with pkgs;
             [
-              colmap # Structure-from-Motion
+              colmap-fixed # Structure-from-Motion
               ffmpeg-full # Video processing
             ]
             ++ pythonDeps;
@@ -64,6 +79,13 @@
             ];
           });
 
+          # See comment in devShells.default for explanation.
+          colmap-fixed = pkgs.colmap.overrideAttrs (old: {
+            patches = (old.patches or [ ]) ++ [
+              ./patches/colmap-bitmap-oiio-copy.patch
+            ];
+          });
+
           # Python with dependencies for GPS processing
           pythonDeps = [
             # GPS integration dependencies
@@ -83,7 +105,7 @@
             with pkgs;
             [
               # Core dependencies
-              colmap # Structure-from-Motion
+              colmap-fixed # Structure-from-Motion
               ffmpeg-full # Video processing
               exiftool # DJI metadata extraction
               imagemagick # Image processing

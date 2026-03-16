@@ -1,0 +1,36 @@
+Fix null meta_data_ dereference when copying default-constructed Bitmap.
+
+The openimageio.patch introduced OIIOMetaData::Clone() calls in Bitmap's copy
+constructor and copy assignment operator without guarding against null
+meta_data_. A default-constructed Bitmap() leaves meta_data_ == nullptr.
+Copying such an empty Bitmap (e.g. when model.images is vector-copied in
+patch_match.cc) triggers THROW_CHECK_NOTNULL inside OIIOMetaData::Upcast(),
+crashing patch_match_stereo with:
+  E bitmap.cc:64] 'dynamic_cast<OIIOMetaData*>(meta_data)' Must be non NULL
+
+This adds the IsEmpty() guards present in the colmap main branch (post PR #3459).
+--- a/src/colmap/sensor/bitmap.cc
++++ b/src/colmap/sensor/bitmap.cc
+@@ -169,7 +169,9 @@
+   channels_ = other.channels_;
+   linear_colorspace_ = other.linear_colorspace_;
+   data_ = other.data_;
+-  meta_data_ = OIIOMetaData::Clone(other.meta_data_);
++  if (!other.IsEmpty()) {
++    meta_data_ = OIIOMetaData::Clone(other.meta_data_);
++  }
+ }
+ 
+ Bitmap::Bitmap(Bitmap&& other) noexcept {
+@@ -190,7 +192,11 @@
+   channels_ = other.channels_;
+   linear_colorspace_ = other.linear_colorspace_;
+   data_ = other.data_;
+-  meta_data_ = OIIOMetaData::Clone(other.meta_data_);
++  if (other.IsEmpty()) {
++    meta_data_ = nullptr;
++  } else {
++    meta_data_ = OIIOMetaData::Clone(other.meta_data_);
++  }
+   return *this;
+ }
