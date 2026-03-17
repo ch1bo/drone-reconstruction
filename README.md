@@ -62,13 +62,91 @@ at `nerfstudio/`. This happens automatically the first time the `full` shell
 is created (`postVenvCreation` in `flake.nix`). The submodule approach
 allows pinning to a specific commit and applying local patches if needed.
 
+## Flight planning
+
+The quality of the 3D reconstruction depends heavily on the flight pattern.
+COLMAP works by finding matching features across frames and solving for
+camera poses jointly. Certain flight patterns make this much harder than
+others.
+
+### What works well
+
+**Grid (lawnmower) pattern** is the standard photogrammetry approach and
+what COLMAP is designed for. Fly parallel passes with ~70% lateral overlap
+between strips. Every ground point is seen from multiple positions and
+angles, giving BA strong constraints on both structure and scale. For a
+plot or field, a double-grid (two perpendicular sets of passes) is even
+better.
+
+**Consistent altitude and camera angle.** Pick a fixed flight altitude
+(typically 2–3× the width of the area of interest) and keep the camera
+at a fixed angle — nadir (straight down) for area mapping, or a fixed
+oblique angle for buildings. Consistent framing means consistent feature
+appearance across frames, which makes matching reliable.
+
+**Separate passes for different purposes.** If you want both a top-down
+area map and coverage of vertical facades, do them as separate flight
+phases: a grid pass for the area, then a dedicated orbit at constant
+altitude and constant distance for the facades. Mixing both in a single
+pass makes it hard for COLMAP to find consistent overlaps.
+
+**Loops at two altitudes.** If the flight path loops back over the same
+ground, fly the loop at two different altitudes (e.g. 20 m and 40 m).
+The altitude difference creates enough parallax change that COLMAP can
+distinguish loop iterations and anchor scale. A single-altitude loop
+creates a "corridor" ambiguity — consecutive loops look nearly identical
+and BA drifts in scale between them.
+
+### What causes problems
+
+**Omnidirectional panning (rotating in place).** When the camera rotates
+without translating, consecutive frames share very few features. Sequential
+matching assumes mostly forward motion; a rotating or widely panning camera
+violates that assumption. With too few cross-frame tie-points, bundle
+adjustment is under-constrained and can collapse to a degenerate solution
+(e.g. wildly wrong focal length or distortion coefficients).
+
+**Descent followed by flat flight.** Frames taken during a descent have
+very different scale and perspective from frames taken at cruise altitude.
+COLMAP has to solve a single camera model that works for both, and the
+transition phase provides little frame-to-frame overlap between the two
+regimes. Either start recording only once at cruise altitude, or treat the
+descent as a separate scene.
+
+**Too few frames.** Sequential matching links each frame to its neighbours.
+If frames are too far apart (large baseline), fewer features match and
+accumulated drift grows. For drone video, 2 fps is a practical minimum at
+normal flying speed; increase to 5 fps if the drone moves slowly or the
+scene has repetitive texture.
+
+**Single-altitude loops.** Multiple loops over the same ground at the same
+altitude look nearly identical. Without cross-loop tie-points BA cannot
+distinguish scale changes between loops and the trajectory drifts vertically
+even though the drone stayed at constant altitude.
+
+### Diagnosing a bad reconstruction
+
+Open the sparse model in the COLMAP GUI and look at the camera trajectory.
+Signs of trouble:
+
+- **Spiral or corkscrew path** where the drone was actually flying level:
+  accumulated drift in scale, caused by insufficient cross-frame constraints.
+- **Degenerate intrinsics** (`fx ≫ fy` or `fx ≪ fy`, or `|k1| > 0.1`):
+  BA solved for nonsense camera parameters to explain the reprojection error,
+  usually because there were not enough well-distributed matches.
+- **High mean reprojection error** (> 1 px for a well-calibrated drone
+  camera): the solved poses do not explain the features well; the model
+  is unreliable.
+- **Multiple small sub-models** instead of one large one: COLMAP could not
+  link all frames into a single connected reconstruction.
+
 ## Pipeline
 
-Frame extraction, sparse reconstruction, and GPS alignment run in the
-default shell (`nix develop`) — they only need ffmpeg and COLMAP. The
-optional dense point cloud step is split: `image_undistorter` and
-`stereo_fusion` are CPU-only (default shell); `patch_match_stereo` needs
-CUDA (full shell). Training and viewing need the full shell for nerfstudio.
+Frame extraction, sparse reconstruction, GPS alignment, and dense MVS all
+run in the default shell (`nix develop`) — they only need ffmpeg and
+COLMAP, except `patch_match_stereo` which needs CUDA (run that step in
+`nix develop .#full`). The Nerfstudio training and export steps also need
+the full shell.
 
 ```
 DJI video (.MP4) + telemetry (.SRT)
@@ -78,18 +156,20 @@ DJI video (.MP4) + telemetry (.SRT)
   colmap                    ← feature extraction, matching, sparse SfM
         │
         ▼
-  GPS alignment             ← align_existing_reconstruction.sh
+  GPS alignment             ← srt_to_reference_poses.py + colmap model_aligner
         │  reads GPS from .SRT, aligns COLMAP model using
-        │  COLMAP model_aligner (Sim3 fit to GPS positions)
+        │  a Sim3 fit to GPS positions (ENU, metres)
         │
         ▼
-  colmap (optional)         ← dense point cloud via MVS
+  colmap MVS                ← dense point cloud: image_undistorter,
+        │                      patch_match_stereo (CUDA), stereo_fusion
+        │  output: fused.ply — georeferenced, usable in MeshLab / CloudCompare
         │
-        ▼
+        ▼  (optional)
   ns-train splatfacto       ← 3D Gaussian Splatting training
         │
         ▼
-  ns-viewer / ns-export     ← interactive viewing or mesh/point cloud export
+  ns-viewer / ns-export     ← interactive viewing or mesh/splat export
 ```
 
 ### Frame extraction
@@ -207,12 +287,14 @@ dominant source of error in the final model's geographic positioning.
 Relative distances within the model (measured from COLMAP, not GPS) are
 sub-meter accurate.
 
-### Dense point cloud (optional)
+### Dense point cloud
 
-After the sparse reconstruction, COLMAP can compute per-pixel depth maps
-and fuse them into a dense point cloud via Multi-View Stereo. This gives
-real geometry — not a learned representation — directly usable in
-MeshLab, CloudCompare, or a GIS tool.
+After the sparse reconstruction, COLMAP computes per-pixel depth maps and
+fuses them into a dense point cloud via Multi-View Stereo (MVS). This gives
+real geometry — not a learned representation — directly usable in MeshLab,
+CloudCompare, or a GIS tool. The output is a georeferenced coloured point
+cloud in ENU metres, ready to measure distances, export to other software,
+or use as a deliverable on its own.
 
 The MVS pipeline needs its own workspace layout (undistorted images +
 sparse model as siblings). `image_undistorter` sets that up from the
@@ -242,12 +324,17 @@ The output `fused.ply` is a coloured point cloud in the same coordinate
 system as the sparse model — so if you have run GPS alignment, it is
 already georeferenced in ENU metres.
 
-`patch_match_stereo` is GPU-only (CUDA required). `image_undistorter` and
-`stereo_fusion` run on CPU and can be done in the default shell.
-`stereo_fusion` is also the step most sensitive to RAM: for 1000 full-res
-frames expect several GB of working set.
+`patch_match_stereo` is GPU-only (CUDA required); run it in
+`nix develop .#full`. `image_undistorter` and `stereo_fusion` run on CPU
+and work in the default shell. `stereo_fusion` is the step most sensitive
+to RAM: for 1000 full-res frames expect several GB of working set.
 
-### Training
+### Training (optional)
+
+The dense point cloud from MVS is already a useful end product. If you
+want a photorealistic renderable model on top of that, Nerfstudio's
+`splatfacto` trains a 3D Gaussian Splatting model from the same frames and
+camera poses.
 
 ```sh
 ns-train splatfacto \
@@ -279,7 +366,7 @@ visual quality. NeRF variants like Zip-NeRF may give better results for
 scenes with fine detail, but the speed tradeoff is steep. `splatfacto` is
 Nerfstudio's implementation and well-maintained.
 
-### Viewing and exporting
+### Viewing and exporting (optional)
 
 ```sh
 # Interactive viewer (serves in browser)
