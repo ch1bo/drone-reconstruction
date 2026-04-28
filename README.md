@@ -172,15 +172,25 @@ DJI video (.MP4) + telemetry (.SRT)
   ns-viewer / ns-export     ← interactive viewing or mesh/splat export
 ```
 
+### Variables
+
+Set these once before running the pipeline commands below. For a new
+run, change these values and re-run the same command blocks.
+
+```sh
+SCENE=data/flight1
+VIDEO=input/DJI_20260117094704_0020_D.MP4
+```
+
 ### Frame extraction
 
 ```sh
-mkdir -p data/flight1/images
+mkdir -p $SCENE/images
 
-ffmpeg -i input/DJI_20260117094704_0020_D.MP4 \
+ffmpeg -i $VIDEO \
   -vf fps=2 \
   -q:v 2 \
-  data/flight1/images/frame_%06d.jpg
+  $SCENE/images/frame_%06d.jpg
 ```
 
 `fps=2` extracts 2 frames per second. For a 5-minute flight at normal
@@ -193,26 +203,26 @@ on the images directly, so quality matters more here than disk space.
 ### Sparse reconstruction with COLMAP
 
 ```sh
-mkdir -p data/flight1/sparse
+mkdir -p $SCENE/sparse
 
 # Feature extraction — SIFT keypoints for each image
 colmap feature_extractor \
-  --database_path data/flight1/database.db \
-  --image_path data/flight1/images \
+  --database_path $SCENE/database.db \
+  --image_path $SCENE/images \
   --ImageReader.camera_model OPENCV \
   --ImageReader.single_camera 1 \
   --FeatureExtraction.use_gpu 1
 
 # Sequential matching — matches each frame to its neighbours only
 colmap sequential_matcher \
-  --database_path data/flight1/database.db \
+  --database_path $SCENE/database.db \
   --FeatureMatching.use_gpu 1
 
 # Sparse reconstruction — estimates camera poses and 3D point cloud
 colmap mapper \
-  --database_path data/flight1/database.db \
-  --image_path data/flight1/images \
-  --output_path data/flight1/sparse
+  --database_path $SCENE/database.db \
+  --image_path $SCENE/images \
+  --output_path $SCENE/sparse
 ```
 
 `single_camera 1` tells COLMAP all images share the same intrinsics (one
@@ -234,9 +244,9 @@ Inspect the result:
 
 ```sh
 colmap gui \
-  --import_path data/flight1/sparse/0 \
-  --database_path data/flight1/database.db \
-  --image_path data/flight1/images
+  --import_path $SCENE/sparse/0 \
+  --database_path $SCENE/database.db \
+  --image_path $SCENE/images
 ```
 
 ### GPS alignment
@@ -244,16 +254,16 @@ colmap gui \
 ```sh
 # Parse SRT and write a reference poses file for colmap model_aligner
 python scripts/srt_to_reference_poses.py \
-  --srt input/DJI_20260117094312_0018_D.SRT \
-  --video input/DJI_20260117094312_0018_D.MP4 \
+  --srt ${VIDEO%.MP4}.SRT \
+  --video $VIDEO \
   --fps 2 \
-  --output data/flight1/reference_poses.txt
+  --output $SCENE/reference_poses.txt
 
 # Fit a Sim3 transform between the COLMAP reconstruction and the GPS positions
 colmap model_aligner \
-  --input_path data/flight1/sparse/0 \
-  --output_path data/flight1/aligned \
-  --ref_images_path data/flight1/reference_poses.txt \
+  --input_path $SCENE/sparse/0 \
+  --output_path $SCENE/aligned \
+  --ref_images_path $SCENE/reference_poses.txt \
   --ref_is_gps 1 \
   --alignment_type enu \
   --alignment_max_error 10
@@ -303,21 +313,21 @@ GPS-aligned model:
 ```sh
 # Prepare undistorted workspace for MVS
 colmap image_undistorter \
-  --image_path data/flight1/images \
-  --input_path data/flight1/aligned \
-  --output_path data/flight1/dense \
+  --image_path $SCENE/images \
+  --input_path $SCENE/aligned \
+  --output_path $SCENE/dense \
   --output_type COLMAP
 
 # Compute depth maps (requires CUDA, run in nix develop .#full)
 colmap patch_match_stereo \
-  --workspace_path data/flight1/dense \
+  --workspace_path $SCENE/dense \
   --PatchMatchStereo.geom_consistency true
 
 # Fuse depth maps into a single point cloud
 colmap stereo_fusion \
-  --workspace_path data/flight1/dense \
+  --workspace_path $SCENE/dense \
   --input_type geometric \
-  --output_path data/flight1/dense/fused.ply
+  --output_path $SCENE/dense/fused.ply
 ```
 
 The output `fused.ply` is a coloured point cloud in the same coordinate
@@ -338,7 +348,7 @@ camera poses.
 
 ```sh
 ns-train splatfacto \
-  --data data/flight1 \
+  --data $SCENE \
   --output-dir outputs/ \
   colmap-data-parser-config \
     --colmap-path colmap/aligned \
